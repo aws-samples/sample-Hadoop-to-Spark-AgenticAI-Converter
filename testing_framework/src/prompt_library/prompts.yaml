@@ -1,0 +1,980 @@
+##############################################################################
+# Hive vs Spark SQL Equivalence Test Framework — Prompt Library
+# 12 prompts: one per MCP tool, organized by session
+##############################################################################
+
+# ==========================================================================
+# SESSION 1: DDL EXTRACTION (Fully Automatic)
+# ==========================================================================
+ddl_extraction:
+  template: |
+    OBJECTIVE: Extract table schemas for all tables referenced in the HiveQL file.
+    Fully automatic — no user interaction. Scan DDL files, cross-reference with
+    HiveQL, fill gaps by inference.
+
+    HiveQL file: {hive_file}
+    DDL directory: input/ddl/
+
+    STEP 0 — UNDERSTAND THE QUERY AND DECIDE IF THERE IS ANYTHING TO VALIDATE:
+    Before proceeding, read the FULL file at {hive_file} and understand what
+    the SQL actually does. Think about it like a data engineer reviewing a script:
+
+    Ask yourself:
+    1. Does this file contain a meaningful data transformation or query?
+       - Does it read from source tables and produce a result set or write to a target?
+       - Is there an INSERT INTO, INSERT OVERWRITE, CREATE TABLE AS SELECT,
+         WITH ... SELECT, or a standalone SELECT that produces output?
+    2. Or is this file something else entirely?
+       - A configuration dump (only SET statements, no actual query logic)
+       - A results file that records outputs from a previous execution
+       - A DDL-only script (only CREATE/DROP, no data movement)
+       - An incomplete or truncated file where the core query logic is missing
+
+    The key question: If you ran this file in Hive/Spark, would it produce a
+    result set that can be compared between engines? SET statements, DROP TABLE,
+    and configuration lines don't count — look for the actual data logic.
+
+    CRITICAL RULE — NEVER SKIP A FILE THAT HAS SQL LOGIC:
+    - If the file has SELECT, INSERT, or CREATE TABLE AS SELECT → ALWAYS proceed
+    - Custom UDFs (ADD JAR + CREATE TEMPORARY FUNCTION) → proceed, they will be stubbed during execution
+    - Non-deterministic functions (unix_timestamp(), rand()) → proceed, they will be replaced with fixed values during execution
+    - Large number of columns (100+, 300+, 400+) → proceed, infer schemas normally
+    - Multiple UNION ALL branches → proceed, this is normal SQL
+    - Complex JOINs → proceed, this is normal SQL
+
+    ONLY skip if the file has ZERO executable SQL logic:
+    - File contains ONLY SET statements and no SELECT/INSERT
+    - File is a log/results dump with no actual SQL
+    - File is truncated/incomplete with no complete statement
+
+    IF there is NO executable SQL logic at all (truly nothing to run):
+    1. Write a clear, specific reason explaining what the file actually contains
+    2. Save a skip marker to {schemas_file}:
+       ```json
+       {{
+         "skipped": true,
+         "skip_reason": "<your specific explanation>",
+         "file_analyzed": "{hive_file}",
+         "file_type_detected": "<concise label: execution_log | config_only | ddl_only | incomplete>",
+         "recommendation": "<actionable advice>"
+       }}
+       ```
+    3. STOP HERE. Do not proceed to Steps A-D.
+
+    FOR FILES WITH UDFs, NON-DETERMINISTIC FUNCTIONS, OR COMPLEX SCHEMAS:
+    → DO NOT SKIP. Proceed to Steps A-D normally.
+    → Note UDF dependencies in the schemas.json output for later handling.
+    → The execution phase (Session 4) will handle UDF stubbing.
+
+    IF there IS executable SQL (which includes files with UDFs, large schemas, UNION ALL, etc.),
+    proceed with Steps A-D below.
+
+    STEP A — SCAN DDL INPUT DIRECTORY:
+    1. List ALL files in input/ddl/ (any extension: .sql, .hql, .ddl, .txt, etc.)
+    2. For each file, read the entire content
+    3. Extract every CREATE TABLE statement found:
+       - Handle messy files: multiple CREATE TABLEs per file, junk lines, bad formatting
+       - Skip unparseable lines, log warnings
+       - Extract: table name, column names, column types, partition columns
+       - Handle: CREATE TABLE, CREATE EXTERNAL TABLE, CREATE TABLE IF NOT EXISTS
+       - Handle: database.table_name → strip database prefix, keep table_name
+    4. Build DDL map: table_name → columns list with types + partitions
+    5. Log: "Scanned N files in input/ddl/, found M CREATE TABLE statements"
+    6. If input/ddl/ is empty or has no parseable DDL → DDL map is empty, continue
+
+    STEP B — EXTRACT REQUIRED TABLES FROM HIVEQL:
+    1. Read the FULL HiveQL file at {hive_file} (may be 7000+ lines)
+    2. Extract every table name referenced in:
+       - FROM clauses
+       - JOIN clauses (LEFT, RIGHT, INNER, OUTER, CROSS, FULL)
+       - INSERT INTO / INSERT OVERWRITE TABLE clauses
+       - Subqueries
+    3. EXCLUDE: SQL keywords, aliases, CTEs (WITH clause names are NOT tables)
+    4. This is the "required tables" list
+    5. Log: "HiveQL references N unique tables"
+
+    STEP C — MATCH DDL + FILL GAPS:
+    For each required table:
+
+    IF found in DDL map:
+      → Use the exact schema from DDL
+      → Set source: "ddl_file"
+
+    IF NOT found in DDL map:
+      → Infer schema from HiveQL analysis:
+        a. Find all alias.column_name patterns where alias maps to this table
+        b. Find columns in SELECT lists that reference this table
+        c. Find columns in WHERE / ON / GROUP BY / ORDER BY referencing this table
+        d. Guess column types from name patterns:
+           - *_id, *_key, *_num, *_cnt, *_count → INT
+           - *_dt, *_date, *_dob → DATE
+           - *_ts, *_timestamp → TIMESTAMP
+           - *_amt, *_amount, *_price, *_cost, *_salary, *_balance → DECIMAL(18,2)
+           - *_cnt, *_count → DECIMAL(18,0) (use wide precision to avoid overflow in SUM/COUNT)
+           - *_flag, is_*, has_* → BOOLEAN
+           - *_pct, *_rate → DOUBLE
+           - Everything else → STRING
+        e. Detect partition columns from PARTITION BY / PARTITIONED BY clauses
+      → Set source: "inferred"
+      → Log: "Table 'X' not found in DDL, inferred N columns from HiveQL"
+
+    If a table has NO columns found at all, create a minimal schema:
+      → id INT, value STRING, created_dt DATE
+      → Set source: "inferred_minimal"
+      → Log warning: "Table 'X' — no columns found, using minimal schema"
+
+    STEP C2 — LIST ${{VAR}} PARAMETERS:
+    Find every ${{NAME}} placeholder in the HiveQL (schema names like
+    ${{OPCODE_HIVE_SCHEMA}}, dates like ${{START_CPD_DT}}, lists like ${{REGN_CD_LIST}}).
+    Record each one under "variables" with where it is used, e.g.
+      "variables": {{"OPCODE_HIVE_SCHEMA": "schema prefix", "START_CPD_DT": "date yyyyMMdd"}}
+    Session 2 assigns the test values; both engines use the same values.
+
+    STEP D — SAVE OUTPUT:
+    Save to: {schemas_file}
+
+    Format:
+    ```json
+    {{
+      "ddl_files_scanned": <number>,
+      "ddl_tables_found": <number>,
+      "hive_tables_required": <number>,
+      "tables_from_ddl": <number>,
+      "tables_inferred": <number>,
+      "variables": {{"<NAME>": "<how it is used>"}},
+      "udf_dependencies": {{
+        "has_udfs": true/false,
+        "udf_names": ["is_valid", "is_blank", ...],
+        "jar_files": ["path/to/jar1.jar", ...],
+        "non_deterministic_functions": ["from_unixtime(unix_timestamp())", "rand()"],
+        "udf_affected_columns": ["col_name_1", "col_name_2"],
+        "note": "UDFs will be stubbed identically in both Hive and Spark during execution"
+      }},
+      "tables": {{
+        "<table_name>": {{
+          "columns": [
+            {{"name": "<col>", "type": "<TYPE>", "nullable": true}},
+            ...
+          ],
+          "database_variable": "<NAME of the ${{VAR}} schema prefix, or null>",
+          "partitions": ["<partition_col>"],
+          "source": "ddl_file" | "inferred" | "inferred_minimal"
+        }}
+      }}
+    }}
+    ```
+
+    CRITICAL:
+    - Every table referenced in the HiveQL MUST have an entry in schemas.json
+    - Handle 7000+ line files — read the entire file
+    - Handle messy DDL files gracefully
+    - If the file has UDFs: still extract ALL tables and schemas, note UDFs in udf_dependencies
+    - If the file has 300+ columns: infer them ALL (use the naming patterns)
+    - If the file has non-deterministic functions: note them, they'll be fixed during execution
+    - NEVER produce a "skipped" marker for files that have SQL logic
+    - Log everything for transparency
+
+
+# ==========================================================================
+# SESSION 2: TEST DATA GENERATION
+# ==========================================================================
+test_data_generation:
+  template: |
+    OBJECTIVE: Generate realistic test data for all tables and produce
+    dialect-aware SQL scripts for both Hive and Spark, plus reference files.
+
+    Schema file: {schema_file}
+    HiveQL file: {hive_file}
+
+    STEP 1 — READ SCHEMAS AND HIVEQL:
+    1. Read the schemas.json file at {schema_file}
+    2. List all tables and their columns with types
+    3. ALSO read the original HiveQL file ({hive_file}) to extract WHERE clause literals
+
+    Output folder for EVERYTHING this session writes: {gen_dir}/
+
+    STEP 1A — ASSIGN TEST VALUES TO ${{VAR}} PARAMETERS (variables.json):
+    Read "variables" from schemas.json (and scan the HiveQL for any ${{NAME}} it missed).
+    Choose ONE value per variable and save {gen_dir}/variables.json:
+    ```json
+    {{"OPCODE_HIVE_SCHEMA": "test_opcode", "START_CPD_DT": "20240101", "REGN_CD_LIST": "1,2"}}
+    ```
+    - Schema variables -> a short lowercase test database name (test_<name>). Several
+      variables may share one database.
+    - Date variables -> values in the format the query parses them with, and consistent
+      with the generated rows (so date filters keep rows).
+    - List variables used in IN (${{X}}) -> comma-separated values that the rows contain.
+    Sessions 4 replace every ${{NAME}} with these exact values in BOTH engines, so the
+    two engines always run the same query text.
+
+    STEP 1B — EXTRACT WHERE CLAUSE LITERALS FROM HIVEQL (CRITICAL):
+    This step is ESSENTIAL to avoid zero-row results. The HiveQL query contains
+    WHERE clauses that filter on specific literal values. If the generated test
+    data does not contain these exact values, ALL rows will be filtered out and
+    the test will produce 0 results.
+
+    1. Parse the HiveQL file for ALL WHERE clause conditions that compare a column
+       to a literal value. Extract a map of column_name → required_literal_values.
+       Examples of patterns to find:
+       - column = 'value'           → column needs 'value'
+       - column IN ('a', 'b', 'c') → column needs at least one of 'a', 'b', 'c'
+       - column = 0                 → column needs 0
+       - column = 1                 → column needs 1
+       - column BETWEEN 'x' AND 'y' → column needs values in that range
+
+    2. Also extract literals from JOIN ON conditions that include filters:
+       - ON (a.col = b.col AND b.actv_ind = 'Y')  → actv_ind needs 'Y'
+
+    3. Build a "required_literals" map. For example, for a query with
+       WHERE o.status = 'SHIPPED' AND o.channel IN ('WEB','STORE') AND c.actv_ind = 'Y':
+       - actv_ind → ['Y']  (often used in several lookup tables)
+       - status → ['SHIPPED']
+       - channel → ['WEB', 'STORE']
+       - return_flag → [''] (empty string, if the query filters TRIM(return_flag) = '')
+
+    4. For date/time columns referenced in WHERE with variable substitution
+       (e.g., ${{START_DT}}), generate reasonable test values:
+       - order_dt → dates like '2024-01-15', '2024-02-20' (valid date strings)
+       - ship_dt → dates close to order_dt (if the query uses DATEDIFF between them)
+       - order_mnth_id → matching YYYYMM values like 202401, 202402
+
+    STEP 2 — IDENTIFY SHARED KEYS (for JOIN correctness):
+    1. Find columns that appear in multiple tables with the same name
+       (e.g., customer_id in both customers and orders)
+    2. These are shared join keys
+    3. Generate a shared value pool for each key:
+       - INT keys: sequential values starting from 1001 (1001, 1002, 1003, ...)
+       - STRING keys: formatted values like "KEY_001", "KEY_002", ...
+       - DATE keys: sequential dates starting from 2023-01-15
+    4. All tables sharing a key column get values from the SAME pool
+
+    STEP 3 — GENERATE ROWS (5-10 per table):
+    For each table, generate rows using the required_literals from Step 1B:
+
+    CRITICAL RULE: For any column that has required literal values from WHERE clauses,
+    AT LEAST 2-3 rows (including Row 0) MUST use those exact literal values.
+    This ensures the WHERE filters don't eliminate all rows.
+
+    For example, if the query has WHERE actv_ind = 'Y' AND usr_cd = 'J':
+    - Row 0 of tedc_mrch_catg_grp MUST have actv_ind='Y' AND usr_cd='J'
+    - Row 1 should also have actv_ind='Y' AND usr_cd='J'
+    - Remaining rows can have other values for testing edge cases
+
+    For the main fact table (the FROM table), ALL non-null rows should satisfy
+    the WHERE clause so that at least some rows survive all filters.
+
+    General row generation:
+    - Row 0: all non-null values, ALL WHERE-clause literals satisfied (baseline row)
+    - Rows 1-2: WHERE-clause literals satisfied, ~20% NULL on non-filter columns
+    - Rows 3-4: mix of matching and non-matching values for edge case testing
+    - Include edge cases:
+      - Empty string '' for at least one STRING column in one row
+      - Value 0 for at least one numeric column in one row
+      - Boundary date '2023-01-01' and '2025-12-31' for DATE columns
+      - Large decimal value for DECIMAL columns (e.g., 99999.99)
+
+    Value generation by type:
+    - INT: random 1-9999 (unless shared key → use pool, unless WHERE literal → use literal)
+    - BIGINT: random 100000-9999999
+    - DECIMAL(18,2): random 0.01-99999.99, formatted with 2 decimals
+    - DECIMAL columns: CRITICAL — NEVER use DECIMAL(1,0) or any precision < 10.
+      Hive silently returns NULL on overflow while Spark widens automatically.
+      Always use at least DECIMAL(18,0) for integer-like decimals and DECIMAL(18,2) for money.
+      If DDL says DECIMAL(1,0), widen it to DECIMAL(11,0) in BOTH setup_hive.sql and setup_spark.sql.
+    - DOUBLE/FLOAT: random 0.01-9999.99
+    - STRING: IF column has required literals → use those literals first, THEN:
+      - *_name → 'test_xxxxx'
+      - *_email → 'xxxxx@test.com'
+      - *_status → random from ['ACTIVE', 'INACTIVE', 'PENDING']
+      - *_type, *_code → random 3-char uppercase like 'ABC'
+      - default → 'val_xxxxxxxx'
+    - DATE: random date between 2023-01-01 and 2025-12-31, format 'YYYY-MM-DD'
+    - TIMESTAMP: random datetime, format 'YYYY-MM-DD HH:MM:SS'
+    - BOOLEAN: random true/false
+
+    STEP 4 — BUILD HIVE SQL (setup_hive.sql):
+    Start with one CREATE DATABASE IF NOT EXISTS <db>; per database in variables.json.
+    Create every table under its database: <db>.<table_name> (the database comes from
+    the table's ${{VAR}} prefix in the HiveQL; tables without a prefix go in default).
+    Include the INSERT target table(s) too, created EMPTY, with column types that match
+    the SELECT list, in the same column order.
+    For each table (in dependency order if known):
+    ```sql
+    DROP TABLE IF EXISTS <table_name>;
+    CREATE TABLE <table_name> (
+      <col1> <TYPE>,
+      <col2> <TYPE>,
+      ...
+    )
+    ROW FORMAT DELIMITED
+    FIELDS TERMINATED BY ','
+    STORED AS TEXTFILE;
+
+    INSERT INTO <table_name> VALUES
+      (<val1>, <val2>, ...),
+      (<val1>, <val2>, ...),
+      ...;
+    ```
+    - String values wrapped in single quotes
+    - NULL values as NULL (no quotes)
+    - DATE values as 'YYYY-MM-DD'
+    - BOOLEAN values as true/false (no quotes)
+
+    STEP 5 — BUILD SPARK SQL (setup_spark.sql):
+    For each table:
+    ```sql
+    DROP TABLE IF EXISTS <table_name>;
+    CREATE TABLE <table_name> (
+      <col1> <TYPE>,
+      <col2> <TYPE>,
+      ...
+    );
+
+    INSERT INTO <table_name> VALUES
+      (<val1>, <val2>, ...),
+      (<val1>, <val2>, ...),
+      ...;
+    ```
+    - Same databases, tables, column types and rows as Hive, but NO ROW FORMAT / STORED AS clauses
+    - Same value formatting
+
+    STEP 6 — BUILD REFERENCE FILES:
+    a. Save {gen_dir}/sample_data.json:
+    ```json
+    {{
+      "generated_at": "<ISO timestamp>",
+      "rows_per_table": 5,
+      "shared_keys": {{
+        "customer_id": [1001, 1002, 1003, 1004, 1005]
+      }},
+      "tables": {{
+        "<table_name>": {{
+          "schema": [{{"name": "col", "type": "INT"}}, ...],
+          "rows": [
+            {{"col1": "val1", "col2": "val2"}},
+            ...
+          ]
+        }}
+      }}
+    }}
+    ```
+
+    b. Save one CSV per table: {gen_dir}/tables/<table_name>.csv
+    - First row is header (column names)
+    - Subsequent rows are data values
+    - NULL represented as empty field
+
+    STEP 7 — SAVE ALL FILES:
+    - {gen_dir}/variables.json
+    - {gen_dir}/setup_hive.sql
+    - {gen_dir}/setup_spark.sql
+    - {gen_dir}/sample_data.json
+    - {gen_dir}/tables/<table_name>.csv (one per table)
+
+    Log: "Generated data for N tables, M rows each"
+
+
+# ==========================================================================
+# SESSION 3: DEPENDENCY ANALYSIS + VALIDATION
+# ==========================================================================
+dependency_analysis:
+  template: |
+    OBJECTIVE: Analyze table dependencies, validate schemas and data,
+    build creation order for test execution.
+
+    HiveQL file: {hive_file}
+    Schema file: {schema_file}
+    Data file: {data_file}
+
+    STEP 1 — READ INPUTS:
+    1. Read the full HiveQL file (may be 7000+ lines)
+    2. Read schemas.json
+    3. Read sample_data.json
+
+    STEP 2 — MAP TABLE DEPENDENCIES:
+    1. For each FROM/JOIN clause, record: source_table → referenced_table
+    2. For INSERT INTO target_table ... SELECT FROM source_tables:
+       record target depends on sources
+    3. Map CTE dependency chains:
+       WITH cte_a AS (...) → WITH cte_b AS (... FROM cte_a ...) → ...
+    4. Identify UNION ALL branches and which tables each branch needs
+
+    STEP 3 — BUILD CREATION ORDER:
+    1. Topological sort: tables with no dependencies first
+    2. Handle circular dependencies: break the cycle, log a warning
+    3. Output ordered list of table names
+
+    STEP 4 — IDENTIFY SHARED JOIN KEYS:
+    1. From JOIN ... ON conditions, extract column pairs:
+       e.g., a.customer_id = b.customer_id → shared key: customer_id
+    2. Map: key_name → list of tables that share it
+
+    STEP 5 — VALIDATE:
+    1. Every table referenced in HiveQL has a schema in schemas.json
+       → If missing: log ERROR
+    2. Every shared key has matching values in sample_data.json
+       → Check that the key column exists in the generated rows
+       → Check that values overlap between tables
+    3. {gen_dir}/setup_hive.sql and {gen_dir}/setup_spark.sql look syntactically reasonable,
+       and every ${{NAME}} in the HiveQL has a value in {gen_dir}/variables.json
+       → Check for balanced parentheses, semicolons, valid keywords
+
+    STEP 6 — SAVE OUTPUT:
+    Save to: {gen_dir}/dependency_graph.json
+
+    Format:
+    ```json
+    {{
+      "creation_order": ["table_a", "table_b", "table_c"],
+      "dependencies": {{
+        "table_b": ["table_a"],
+        "table_c": ["table_a", "table_b"]
+      }},
+      "shared_keys": {{
+        "customer_id": ["customers", "orders"]
+      }},
+      "cte_chains": ["cte_a -> cte_b -> cte_c"],
+      "union_branches": 5,
+      "insert_targets": ["target_table_1"],
+      "validation": {{
+        "all_tables_have_schemas": true,
+        "all_keys_have_data": true,
+        "sql_syntax_ok": true,
+        "issues": []
+      }}
+    }}
+    ```
+
+    Log: "Dependency analysis complete. N tables, M shared keys, validation: PASS/FAIL"
+
+# ==========================================================================
+# SESSION 4: CONTAINER OPERATIONS + EXECUTION + MINUS
+# ==========================================================================
+container_startup:
+  template: |
+    OBJECTIVE: Start Hive and Spark test containers and verify they are ready.
+
+    STEPS:
+    1. If both hive-test-runner and spark-test-runner already show "Up" in finch ps,
+       skip to step 3.
+
+    2. Start containers (the -f path is absolute, run from any directory):
+       finch compose -f {compose_file} up -d
+       If it fails with "port is already allocated", run `finch ps` and report which
+       container holds the port (older setup.sh versions created converter-hive on 10000;
+       remove it with: finch rm -f converter-hive), then retry once.
+
+    3. Wait for Spark to be ready (up to 60 seconds):
+       - Retry: finch exec spark-test-runner pgrep -f spark-sql
+       - Success when exit code is 0
+
+    4. Wait for Hive to be ready (up to 180 seconds — Hive is slow on first start):
+       - Retry: finch exec hive-test-runner beeline -u "jdbc:hive2://localhost:10000" -e "SELECT 1;"
+       - Success when exit code is 0 and output contains "1"
+       - Hive needs time for Derby metastore initialization on first run
+
+    5. Verify both containers are running:
+       finch ps
+
+    6. Report status:
+       - Spark: READY / NOT READY
+       - Hive: READY / NOT READY
+       - If either is not ready, show container logs:
+         finch logs spark-test-runner
+         finch logs hive-test-runner
+
+hive_data_loading:
+  template: |
+    OBJECTIVE: Load generated test data into Hive.
+
+    Setup file: {setup_file}
+
+    STEPS:
+    1. Execute the setup SQL in Hive:
+       finch exec hive-test-runner beeline -u "jdbc:hive2://localhost:10000" -f "{setup_file_container}"
+       ({setup_file_container} is {setup_file} inside the container)
+
+    2. Capture stdout and stderr
+
+    3. Verify tables were created (in each test database):
+       finch exec hive-test-runner beeline -u "jdbc:hive2://localhost:10000" --outputformat=tsv2 -e "SHOW TABLES IN <db>;"
+
+    4. For each expected table, verify row count:
+       finch exec hive-test-runner beeline -u "jdbc:hive2://localhost:10000" --outputformat=tsv2 -e "SELECT COUNT(*) FROM <db>.<table_name>;"
+    If the setup SQL fails, fix the statement in {setup_file} and re-run (max 3 attempts).
+    Apply the same fix to setup_spark.sql in the same folder so both engines keep identical data.
+
+    5. Report:
+       - Tables created: [list]
+       - Row counts: [table: count]
+       - Errors: [any errors from stderr]
+
+spark_data_loading:
+  template: |
+    OBJECTIVE: Load generated test data into Spark.
+
+    Setup file: {setup_file}
+
+    STEPS:
+    1. Execute the setup SQL in Spark:
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -f "{setup_file_container}"
+       ({setup_file_container} is {setup_file} inside the container)
+
+    2. Capture stdout and stderr
+
+    3. Verify tables were created (in each test database):
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -e "SHOW TABLES IN <db>;"
+
+    4. For each expected table, verify row count:
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -e "SELECT COUNT(*) FROM <db>.<table_name>;"
+    If the setup SQL fails, fix the statement in {setup_file} and re-run (max 3 attempts).
+    Apply the same fix to setup_hive.sql in the same folder so both engines keep identical data.
+
+    5. Report:
+       - Tables created: [list]
+       - Row counts: [table: count]
+       - Errors: [any errors from stderr]
+
+
+hive_execution:
+  template: |
+    OBJECTIVE: Execute the full HiveQL query file in Hive and capture results.
+    Must handle files with 7000+ lines in a single execution.
+    CRITICAL: Handle UDF/JAR dependencies gracefully — never stop, always execute what's possible.
+
+    Query file: {query_file}
+
+    STEPS:
+    1. Read the HiveQL file from {query_file}
+
+    2. Analyze UDF dependencies:
+       a. Find all CREATE TEMPORARY FUNCTION declarations:
+          - Extract function names and their JAR dependencies
+          - Build a list: udf_functions = [is_valid, is_blank, is_numeric, ...]
+       b. Find all ADD JAR statements
+       c. These UDFs will NOT work in the test container (no JARs available)
+       d. Also treat functions that do not exist in Hive 4 (for example Presto/Trino
+          date_parse) like unavailable UDFs: stub them in PASS 2 and log them.
+
+    3. Prepare the file for execution:
+
+       PASS 0 — SUBSTITUTE PARAMETERS (always, first):
+       Replace every ${{NAME}} with its value from {variables_file}.
+       Use exactly these values; never invent different ones.
+
+       PASS 1 — REMOVE infrastructure lines (always remove):
+       - Lines starting with: SET hive.* / SET mapreduce.*
+       - Lines starting with: USE <database>;
+       - Lines starting with: ADD JAR
+       - Lines starting with: CREATE TEMPORARY FUNCTION
+       - Lines starting with: set hive.* (case-insensitive)
+
+       PASS 2 — HANDLE UDF-DEPENDENT LINES (smart removal):
+       For each line that calls a UDF function (from the list in step 2a):
+       - If the UDF is in a WHERE clause filter (e.g., WHERE is_valid(col) = 'Y'):
+         → COMMENT OUT the entire WHERE condition containing the UDF
+         → This allows more rows to pass through (less filtering = more testable output)
+       - If the UDF is in a SELECT column (e.g., SELECT is_valid(col) AS valid_flag):
+         → REPLACE with a placeholder: SELECT col AS valid_flag
+         → Or: SELECT 'UDF_STUB' AS valid_flag
+       - If the UDF is in a CASE WHEN (e.g., CASE WHEN is_valid(x) = 'Y' THEN ...):
+         → REPLACE with: CASE WHEN 1=1 THEN ... (always true, takes THEN branch)
+       - If the UDF wraps an entire expression that's critical to the query structure:
+         → REPLACE with the first argument: is_valid(col) → col
+
+       IMPORTANT: Keep track of every modification. Count:
+       - total_lines: total executable lines in original
+       - udf_lines_modified: lines where UDF calls were stubbed/removed
+       - clean_lines: lines executed without modification
+       - testable_percentage: clean_lines / total_lines * 100
+
+    4. Save prepared file to:
+       {prepared_file}
+
+    5. Also save a modification log:
+       {out_dir}/{query_name}_modifications.json
+       ```json
+       {{
+         "total_lines": 6000,
+         "infrastructure_removed": 45,
+         "udf_lines_modified": 120,
+         "clean_lines_executed": 5835,
+         "testable_percentage": 97.2,
+         "udfs_detected": ["is_valid", "is_blank", "is_numeric"],
+         "modifications": [
+           {{"line": 234, "original": "WHERE is_valid(acct) = 'Y'", "modified": "-- [UDF_STUB] WHERE is_valid(acct) = 'Y'", "reason": "UDF not available"}},
+           ...
+         ]
+       }}
+       ```
+
+    6. Execute in Hive:
+       finch exec hive-test-runner beeline -u "jdbc:hive2://localhost:10000" --outputformat=tsv2 -f "{prepared_file_container}"
+       ({prepared_file_container} is {prepared_file} inside the container)
+
+       Timeout: 600 seconds
+
+    7. If execution FAILS (even after UDF removal):
+       - Check the error message
+       - If it's a remaining UDF reference missed in step 3: fix it, re-save, re-execute
+       - If it's a syntax error from the modifications: fix the syntax, re-save, re-execute
+       - Max 3 retry attempts
+       - Log each retry with the error and fix applied
+
+    8. Capture stdout and stderr
+
+    9. Capture the RESULT SET as clean TSV (header + data rows only, no log lines).
+       For INSERT-based queries select the target table (with the database from
+       variables.json); for a plain SELECT run the prepared query itself:
+       finch exec hive-test-runner sh -c 'beeline -u "jdbc:hive2://localhost:10000" --silent=true --showHeader=true --outputformat=tsv2 -e "SELECT * FROM <db>.<target_table>" 2>/dev/null'
+
+    10. Save outputs:
+       - {out_dir}/{query_name}_stdout.txt   <- ONLY the clean TSV from step 9
+       - {out_dir}/{query_name}_stderr.txt   <- the execution log from step 6 (and errors)
+
+    11. Report: success/fail, row count, testable_percentage, UDFs stubbed
+
+spark_execution:
+  template: |
+    OBJECTIVE: Execute the full Spark SQL query file in Spark and capture results.
+    Must handle files with 7000+ lines in a single execution.
+    CRITICAL: Handle UDF/JAR dependencies gracefully — never stop, always execute what's possible.
+
+    Query file: {query_file}
+
+    STEPS:
+    1. Read the Spark SQL file from {query_file}
+
+    2. Analyze UDF dependencies:
+       a. Find all CREATE TEMPORARY FUNCTION declarations (if any remain in Spark SQL):
+          - Extract function names
+          - Build a list: udf_functions = [is_valid, is_blank, ...]
+       b. Also check for function calls that don't have built-in Spark equivalents
+       c. Cross-reference with the Hive execution's modifications.json if available:
+          - Read {hive_modifications_file}
+          - Apply the SAME UDF stubbing strategy for consistency
+
+    3. Prepare the file for execution:
+
+       PASS 0 — SUBSTITUTE PARAMETERS (always, first):
+       Replace every ${{NAME}} with its value from {variables_file}.
+       Use exactly these values; never invent different ones.
+
+       PASS 1 — REMOVE infrastructure lines (always remove):
+       - Lines starting with: SET hive.*
+       - Lines starting with: USE <database>;
+       - Lines starting with: set hive.* (case-insensitive)
+       - Lines with: ADD JAR (if present in Spark SQL)
+       - Lines with: CREATE TEMPORARY FUNCTION (if present)
+
+       PASS 2 — HANDLE UDF-DEPENDENT LINES (same strategy as Hive):
+       Apply the EXACT SAME modifications as the Hive execution to ensure
+       both engines execute the same subset of logic. This is critical for
+       MINUS validation to be meaningful.
+
+       For each line that calls a UDF function:
+       - WHERE clause UDF filter → COMMENT OUT the condition
+       - SELECT column UDF → REPLACE with first argument or 'UDF_STUB'
+       - CASE WHEN UDF → REPLACE with CASE WHEN 1=1 THEN ...
+       - Expression wrapper → REPLACE with first argument
+
+       IMPORTANT: The modifications MUST match what was done for Hive.
+       If Hive commented out line 234, Spark must also comment out the
+       equivalent line. This ensures MINUS compares apples to apples.
+
+    4. Save prepared file to:
+       {prepared_file}
+
+    5. Also save a modification log:
+       {out_dir}/{query_name}_modifications.json
+       (Same format as Hive's modifications.json)
+
+    6. Execute in Spark:
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -f "{prepared_file_container}"
+       ({prepared_file_container} is {prepared_file} inside the container)
+
+       Timeout: 600 seconds
+
+    7. If execution FAILS:
+       - Check the error message
+       - If it's a remaining UDF reference: fix it, re-save, re-execute
+       - If it's a syntax error from modifications: fix the syntax, re-save, re-execute
+       - Max 3 retry attempts
+
+    8. Capture stdout and stderr
+
+    9. Capture the RESULT SET as clean TSV (header + data rows only, no log lines).
+       For INSERT-based queries select the target table (with the database from
+       variables.json); for a plain SELECT run the prepared query itself:
+       finch exec spark-test-runner sh -c "/opt/spark/bin/spark-sql --master 'local[*]' -S --hiveconf hive.cli.print.header=true -e 'SELECT * FROM <db>.<target_table>' 2>/dev/null"
+
+    10. Save outputs:
+       - {out_dir}/{query_name}_stdout.txt   <- ONLY the clean TSV from step 9
+       - {out_dir}/{query_name}_stderr.txt   <- the execution log from step 6 (and errors)
+
+    11. Report: success/fail, row count, testable_percentage, UDFs stubbed
+
+result_comparison:
+  template: |
+    OBJECTIVE: Compare Hive and Spark query outputs using ORDER-INDEPENDENT matching.
+    SQL queries without ORDER BY can return rows in any order — this is NOT a conversion error.
+
+    Hive output file: {hive_output_file}
+    Spark output file: {spark_output_file}
+
+    STEPS:
+    1. Read both output files
+
+    2. Parse TSV output:
+       - Extract header row (column names)
+       - Extract data rows
+       - Filter out log noise: lines starting with INFO, WARN, ERROR, DEBUG,
+         SLF4J, Hive, OK, "Time taken", separator lines (----, +--+)
+
+    3. Compare metadata:
+       a. Row count: Hive rows vs Spark rows
+       b. Column count: Hive columns vs Spark columns
+       c. Column names: do they match?
+
+    4. SORT BOTH RESULT SETS before comparing:
+       - Sort all rows by ALL columns (left to right) as strings
+       - This eliminates false positives from different row ordering
+       - SQL without ORDER BY has non-deterministic row order — this is EXPECTED
+
+    5. After sorting, compare row-by-row with normalization:
+       - NULL variants: NULL, None, "", \N, empty → all normalize to "NULL"
+       - Boolean: true/1 → TRUE, false/0 → FALSE
+       - Numeric precision: compare as float with 6-decimal tolerance
+         (e.g., 3.140000 vs 3.14 → MATCH)
+       - DECIMAL overflow: if one side is NULL and other is a number, check if
+         the column type is DECIMAL with small precision (e.g., DECIMAL(1,0)).
+         If so, classify as "decimal_overflow" not "null_handling" — this is a
+         test schema issue, not a conversion error.
+       - Whitespace: trim before comparison
+       - Date format: YYYY-MM-DD (normalize if different)
+
+    6. Classify each difference:
+       - value_mismatch: actual different values after sorting
+       - null_handling: one side NULL, other not (genuine NULL logic difference)
+       - decimal_overflow: NULL vs value due to DECIMAL precision mismatch in test schema
+       - precision: numeric difference < 0.01
+       - ordering_only: rows exist in both but were in different positions (NOT an error)
+
+    7. IMPORTANT — Determine if differences are CONVERSION ERRORS or TEST ARTIFACTS:
+       - If rows 3 and 5 are swapped between Hive and Spark → ordering_only → NOT an error
+       - If a value is NULL in Hive but has a number in Spark for a DECIMAL column → decimal_overflow → TEST SCHEMA issue
+       - Only flag as "value_mismatch" if the same row (after sorting) has genuinely different values
+
+    8. Save to: {exec_dir}/comparison_results.json
+       Format:
+       ```json
+       {{
+         "row_count_match": true/false,
+         "hive_rows": N,
+         "spark_rows": N,
+         "column_count_match": true/false,
+         "hive_columns": ["col1", "col2"],
+         "spark_columns": ["col1", "col2"],
+         "rows_sorted": true,
+         "total_diffs": N,
+         "genuine_errors": N,
+         "test_artifacts": N,
+         "diffs": [
+           {{
+             "row": 0,
+             "column": "col_name",
+             "hive_value": "...",
+             "spark_value": "...",
+             "diff_type": "value_mismatch|null_handling|decimal_overflow|precision|ordering_only"
+           }}
+         ],
+         "verdict": "PASS — differences are test artifacts, not conversion errors" or "FAIL — genuine conversion differences found"
+       }}
+       ```
+
+
+minus_validation:
+  template: |
+    OBJECTIVE: Run MINUS (EXCEPT ALL) queries to check result-set equivalence.
+    EXCEPT ALL also catches duplicate-row differences that plain EXCEPT hides.
+    If MINUS returns 0 rows both ways, the two engines returned the same
+    results for the generated test data.
+
+    Hive results file: {hive_results_file}
+    Spark results file: {spark_results_file}
+
+    STEPS:
+    1. Read the Hive output and Spark output files
+
+    2. Save Hive results as CSV:
+       {hive_csv}
+       - First row: column headers (tab-separated from output, convert to comma).
+         Strip any "table." prefix Hive adds (tskyf_x.bus_nm -> bus_nm).
+       - Data rows: values. Quote values that contain commas. Write NULL as an empty field.
+
+    3. Save Spark results as CSV the same way:
+       {spark_csv}
+       Both CSVs must have the same columns in the same order.
+
+    4. In the Spark container, create temp views from both CSVs:
+
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -e "
+         CREATE OR REPLACE TEMP VIEW hive_results
+         USING csv
+         OPTIONS (path '{hive_csv_container}',
+                  header 'true', inferSchema 'true');
+
+         CREATE OR REPLACE TEMP VIEW spark_results
+         USING csv
+         OPTIONS (path '{spark_csv_container}',
+                  header 'true', inferSchema 'true');
+       "
+       Temp views only live for one spark-sql session, so run steps 4, 5 and 6 in the
+       SAME spark-sql -e call (views first, then both queries), or repeat the
+       CREATE TEMP VIEW statements before each query.
+
+    5. Run MINUS Direction 1 (Hive has rows Spark doesn't):
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -e "
+         SELECT * FROM hive_results
+         EXCEPT ALL
+         SELECT * FROM spark_results;
+       "
+       → Capture output. Count rows returned.
+
+    6. Run MINUS Direction 2 (Spark has rows Hive doesn't):
+       finch exec spark-test-runner /opt/spark/bin/spark-sql --master 'local[*]' -e "
+         SELECT * FROM spark_results
+         EXCEPT ALL
+         SELECT * FROM hive_results;
+       "
+       → Capture output. Count rows returned.
+
+    7. Determine result:
+       - Both directions return 0 rows → MINUS PASSED ✅
+       - Either direction returns rows → Analyze the differences:
+
+    8. ANALYZE MINUS FAILURES (if rows returned):
+       Compare the rows from Direction 1 and Direction 2 side by side.
+       Determine if the differences are:
+
+       a. DECIMAL OVERFLOW (test artifact, NOT a conversion error):
+          - One side has NULL, other has a number
+          - The column is a DECIMAL type with small precision (e.g., DECIMAL(1,0))
+          - Hive silently returns NULL on overflow, Spark auto-widens
+          - VERDICT: PASS WITH CAVEAT — "DECIMAL precision mismatch in test schema"
+
+       b. ROW ORDERING (test artifact, NOT a conversion error):
+          - Same rows exist in both result sets but in different positions
+          - The query has no ORDER BY clause
+          - VERDICT: PASS — "Row ordering is non-deterministic without ORDER BY"
+
+       c. NULL HANDLING DIFFERENCE (potential conversion issue):
+          - One side consistently produces NULL where other produces a value
+          - Not related to DECIMAL overflow
+          - VERDICT: INVESTIGATE — may be a genuine difference
+
+       d. VALUE MISMATCH (genuine conversion error):
+          - Different values for the same logical row
+          - Not explainable by ordering or type precision
+          - VERDICT: FAIL — genuine conversion difference
+
+    9. FINAL VERDICT LOGIC:
+       - 0 rows both directions → "PASS"
+       - Rows returned but ALL are DECIMAL overflow or ordering → "PASS (with caveats)"
+       - Rows returned with genuine value mismatches → "FAIL"
+
+       Set minus_passed = true for both "PASS" and "PASS (with caveats)"
+       Set minus_passed = false only for genuine "FAIL"
+
+    10. Save to: {exec_dir}/minus_results.json
+       Format:
+       ```json
+       {{
+         "query_name": "{query_name}",
+         "minus_passed": true/false,
+         "verdict": "PASS" | "PASS (with caveats)" | "FAIL",
+         "verdict_explanation": "Human-readable explanation of why it passed or failed",
+         "hive_minus_spark": {{
+           "row_count": 0,
+           "rows": []
+         }},
+         "spark_minus_hive": {{
+           "row_count": 0,
+           "rows": []
+         }},
+         "hive_execution": {{"success": true, "row_count": N}},
+         "spark_execution": {{"success": true, "row_count": N}},
+         "failure_analysis": {{
+           "category": "none|decimal_overflow|ordering|null_handling|value_mismatch",
+           "affected_columns": [],
+           "affected_rows": 0,
+           "is_test_artifact": true/false,
+           "description": "Detailed explanation"
+         }}
+       }}
+       ```
+
+    CRITICAL: The verdict must distinguish between TEST ARTIFACTS (schema issues,
+    ordering) and GENUINE CONVERSION ERRORS. Only mark minus_passed=false for
+    genuine conversion errors. DECIMAL overflow and row ordering differences are
+    NOT conversion errors — they are test infrastructure limitations.
+
+# ==========================================================================
+# SESSION 5: REPORT GENERATION
+# ==========================================================================
+report_generation:
+  template: |
+    OBJECTIVE: Generate a comprehensive TEST_REPORT.html from all session outputs.
+    NOTE: The HTML report is auto-generated by the framework's HTMLReportGenerator.
+    This session ensures all data files are present and triggers the generator.
+
+    Test name: {test_name}
+
+    VERIFY ALL INPUTS EXIST:
+    - {gen_dir}/schemas.json
+    - {gen_dir}/sample_data.json
+    - {gen_dir}/dependency_graph.json
+    - {exec_dir}/hive/{test_name}_stdout.txt
+    - {exec_dir}/spark/{test_name}_stdout.txt
+    - {exec_dir}/hive/{test_name}_modifications.json (UDF tracking)
+    - {exec_dir}/spark/{test_name}_modifications.json (UDF tracking)
+    - {exec_dir}/comparison_results.json
+    - {exec_dir}/minus_results.json
+
+    ENRICH MINUS RESULTS WITH TESTABLE PERCENTAGE:
+    If modifications.json files exist, read them and add to {exec_dir}/minus_results.json:
+    - testable_percentage_hive: from hive modifications
+    - testable_percentage_spark: from spark modifications
+    - udfs_stubbed: list of UDF names that were stubbed
+    - overall_testable_percentage: average of hive and spark percentages
+
+    The HTML report will be auto-generated at: output/testing/reports/{test_name}/TEST_REPORT.html
+    It includes all 10 sections: Executive Summary, Methodology, Infrastructure,
+    Table Schemas, Sample Data, Dependency Graph, Execution Results,
+    MINUS Query Results, Diff Analysis, and Conclusion.
+
+    If UDF dependencies were detected, the report will prominently show:
+    - Which UDFs were stubbed and why
+    - What percentage of the query was fully testable
+    - What the customer needs to provide for 100% validation
+
+    If any input files are missing, log which ones are absent.
+    The report generator handles missing data gracefully with fallback messages.
+
+# ==========================================================================
+# TEARDOWN
+# ==========================================================================
+container_teardown:
+  template: |
+    OBJECTIVE: Stop and remove test containers.
+
+    STEPS:
+    1. Stop and remove containers:
+       finch compose -f {compose_file} down -v
+
+    2. Verify containers are stopped:
+       finch ps
+
+    3. Report cleanup status:
+       - Containers removed: yes/no
+       - Volumes cleaned: yes/no

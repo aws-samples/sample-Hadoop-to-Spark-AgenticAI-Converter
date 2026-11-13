@@ -1,0 +1,7 @@
+    # ── Task: {{ task_id }} ──────────────────────────────────────────────
+    # Source Job: {{ source_job_id }} ({{ source_job_type }} — sentinel/marker)
+    {{ task_id }} = EmptyOperator(
+        task_id="{{ task_id }}",
+        {% if trigger_rule and trigger_rule != 'all_success' %}trigger_rule="{{ trigger_rule }}",{% endif %}
+    )
+

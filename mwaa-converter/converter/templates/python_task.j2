@@ -1,0 +1,23 @@
+    # ── Task: {{ task_id }} ──────────────────────────────────────────────
+    # Source Job: {{ source_job_id }} (Python script on EMR Serverless)
+    # Script: {{ source_script }} → {{ target_script }}
+    {{ task_id }} = EmrServerlessStartJobOperator(
+        task_id="{{ task_id }}",
+        application_id=Variable.get("{{ var_emr_app_id }}", default_var="__PLACEHOLDER__"),
+        execution_role_arn=Variable.get("{{ var_emr_exec_role_arn }}", default_var="__PLACEHOLDER__"),
+        job_driver={
+            "sparkSubmit": {
+                "entryPoint": f"{Variable.get('{{ var_scripts_bucket }}', default_var='__PLACEHOLDER__')}/{{ script_path }}",
+                {% if entry_point_arguments %}"entryPointArguments": {{ entry_point_arguments }},{% endif %}
+                "sparkSubmitParameters": "--conf spark.submit.deployMode=cluster",
+            }
+        },
+        configuration_overrides={
+            "monitoringConfiguration": {
+                "s3MonitoringConfiguration": {
+                    "logUri": f"{Variable.get('{{ var_logs_bucket }}', default_var='__PLACEHOLDER__')}/{{ task_id }}/",
+                }
+            }
+        },
+        {% if aws_conn_id %}aws_conn_id="{{ aws_conn_id }}",{% endif %}
+    )

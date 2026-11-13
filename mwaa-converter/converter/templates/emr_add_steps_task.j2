@@ -1,0 +1,28 @@
+    # ── Task: {{ task_id }} ──────────────────────────────────────────────
+    # Source Job: {{ source_job_id }} (EMR EC2 cluster step)
+    # Script: {{ source_script }} → {{ target_script }}
+    {{ task_id }} = EmrAddStepsOperator(
+        task_id="{{ task_id }}",
+        job_flow_id=Variable.get("{{ var_emr_cluster_id }}", default_var="__PLACEHOLDER__"),
+        steps=[
+            {
+                "Name": "{{ task_id }}",
+                "ActionOnFailure": "CANCEL_AND_WAIT",
+                "HadoopJarStep": {
+                    "Jar": "command-runner.jar",
+                    "Args": [
+                        "spark-submit",
+                        "--deploy-mode",
+                        "cluster",
+                        f"{Variable.get('{{ var_scripts_bucket }}', default_var='__PLACEHOLDER__')}/{{ entry_point_path }}",
+{% for arg in entry_point_args %}
+                        {{ arg }},
+{% endfor %}
+                    ],
+                },
+            }
+        ],
+        {% if aws_conn_id %}aws_conn_id="{{ aws_conn_id }}",{% endif %}
+        wait_for_completion=True,
+        {% if trigger_rule and trigger_rule != 'all_success' %}trigger_rule="{{ trigger_rule }}",{% endif %}
+    )

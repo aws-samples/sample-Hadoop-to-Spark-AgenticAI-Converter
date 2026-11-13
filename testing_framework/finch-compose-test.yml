@@ -1,0 +1,91 @@
+version: '3.8'
+
+# =============================================================================
+# Testing Framework — Container Configuration
+# =============================================================================
+# Hive 4.0 + Spark 3.5 for equivalence testing.
+#
+# Hardening (verified with Finch on the images below):
+#   - ports published on 127.0.0.1 only
+#   - read-only root filesystem; every path the engines write to is a tmpfs
+#     (contents are discarded when the container stops)
+#   - all Linux capabilities dropped, no-new-privileges, memory/CPU limits
+#   - only output/testing/ is mounted (as /test_workspace): generated test data
+#     goes in via generated_data/, query results come out via execution_output/
+#
+# no-new-privileges is listed in both spellings: Finch/nerdctl only enforces the
+# plain form (it ignores ":true"), while Docker and security scanners expect ":true".
+# Outbound networking is not blocked; the test data is synthetic.
+# =============================================================================
+
+services:
+  hive:
+    image: apache/hive:4.0.0
+    container_name: hive-test-runner
+    ports:
+      - "127.0.0.1:10000:10000"   # HiveServer2 Thrift — localhost only
+      - "127.0.0.1:10002:10002"   # Hive Web UI — localhost only
+    environment:
+      SERVICE_NAME: hiveserver2
+      HIVESERVER2_PID_DIR: /tmp   # default is the (read-only) conf dir
+    # Embedded Derby metastore (metastore_db/, derby.log) is created in the
+    # working directory, so run from a tmpfs instead of /opt/hive.
+    working_dir: /opt/hive/run
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777,size=1g          # exec: JVM extracts native libs (snappy) here
+      - /opt/hive/run:uid=1000,gid=1000,mode=0755,size=512m
+      - /opt/hive/data:uid=1000,gid=1000,mode=0755,size=1g          # hive.metastore.warehouse.dir
+      - /opt/hive/scratch_dir:uid=1000,gid=1000,mode=0733,size=256m  # hive.exec.scratchdir — Hive requires 733 (its default)
+      - /opt/hive/install_dir:uid=1000,gid=1000,mode=0755,size=256m  # hive.user.install.directory
+    volumes:
+      - ../output/testing:/test_workspace
+      # The image's hive-site.xml plus a higher Tez counter limit: the default (120)
+      # makes larger queries fail with "Counters limit exceeded: Too many counters".
+      - ./hive-conf/hive-site.xml:/opt/hive/conf/hive-site.xml:ro
+    mem_limit: 4g
+    cpus: 2.0
+    security_opt:
+      - no-new-privileges        # the form Finch/nerdctl enforces
+      - no-new-privileges:true   # the form Docker docs and scanners expect (Finch warns and ignores it)
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "beeline", "-u", "jdbc:hive2://localhost:10000", "-e", "SELECT 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 60s
+
+  spark:
+    image: apache/spark:3.5.0
+    container_name: spark-test-runner
+    ports:
+      - "127.0.0.1:4041:4040"   # Spark UI — localhost only (4041 to avoid conflict)
+    environment:
+      # Bind Spark to localhost so start-up never depends on resolving the
+      # container's own hostname (otherwise spark-sql can abort with UnknownHostException).
+      SPARK_LOCAL_IP: 127.0.0.1
+      SPARK_LOCAL_HOSTNAME: localhost
+    working_dir: /opt/spark/work-dir
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777,size=1g          # exec: JVM extracts native libs here
+      - /opt/spark/work-dir:uid=185,gid=185,mode=0755,size=1g  # metastore_db, spark-warehouse, derby.log
+    volumes:
+      - ../output/testing:/test_workspace
+    mem_limit: 4g
+    cpus: 2.0
+    security_opt:
+      - no-new-privileges        # the form Finch/nerdctl enforces
+      - no-new-privileges:true   # the form Docker docs and scanners expect (Finch warns and ignores it)
+    cap_drop:
+      - ALL
+    command: >
+      bash -c "/opt/spark/bin/spark-sql --master local[*] & tail -f /dev/null"
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "spark-sql"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

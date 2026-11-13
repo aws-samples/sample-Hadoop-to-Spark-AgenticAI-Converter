@@ -1,0 +1,13 @@
+    # ── Sensor: {{ task_id }} ─────────────────────────────────────────────
+    # Waits for: {{ external_dag_id }}.{{ external_task_id }} in its latest run
+    # (the two DAGs have different schedules, so their logical dates never match)
+    {{ task_id }} = ExternalTaskSensor(
+        task_id="{{ task_id }}",
+        external_dag_id="{{ external_dag_id }}",
+        external_task_id="{{ external_task_id }}",
+        execution_date_fn=_latest_run_of("{{ external_dag_id }}"),
+        mode="reschedule",
+        timeout={{ timeout | default(3600) }},
+        poke_interval={{ poke_interval | default(60) }},
+        check_existence=True,
+    )

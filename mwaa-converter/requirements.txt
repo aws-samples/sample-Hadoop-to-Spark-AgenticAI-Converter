@@ -1,0 +1,23 @@
+# =============================================================================
+# MWAA Converter - Requirements (runtime)
+# =============================================================================
+# Pinned to exact, tested versions (identical to ../requirements.txt).
+# Requires Python >= 3.10 (fastmcp).
+fastmcp==4.1.4
+pydantic==2.14.2
+PyYAML==6.0.3
+Jinja2==3.1.6
+click==8.5.0
+defusedxml==0.7.1   # safe XML parsing for Control-M exports (blocks XXE / entity expansion)
+
+# -----------------------------------------------------------------------------
+# Apache Airflow is intentionally NOT listed here.
+# -----------------------------------------------------------------------------
+# It is only used to load generated DAGs in a subprocess (DagBag validation), and its
+# strict dependency pins conflict with the packages above, so it lives in its own venv
+# (venv-airflow/, created by ../setup.sh on Python 3.10-3.12). To create it manually:
+#   python3 -m venv ../venv-airflow
+#   ../venv-airflow/bin/pip install "apache-airflow==2.11.2" "apache-airflow-providers-amazon" \
+#       --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.11.2/constraints-3.12.txt"
+# (replace constraints-3.12.txt with constraints-3.10.txt or constraints-3.11.txt to match your Python).
+# Without it the DagBag check is reported as skipped; DAG generation and syntax checks still run.

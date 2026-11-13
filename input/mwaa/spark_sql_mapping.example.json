@@ -1,0 +1,13 @@
+{
+  "description": "EXAMPLE ONLY - copy to spark_sql_mapping.json and replace with your own entries. Maps each script path referenced by a Control-M job (source_script, exactly as it appears in the job) to the S3 location of its converted Spark SQL (target_script). Only SQL scripts (.hql/.sql) need an entry; non-SQL scripts (.ksh/.sh/.py) become Bash/Python operators and are omitted. ${SCRIPTS_BUCKET} is resolved at runtime from the Airflow Variable of the same name.",
+  "mappings": [
+    {
+      "source_script": "/scripts/example/load_daily_orders.hql",
+      "target_script": "s3://${SCRIPTS_BUCKET}/spark_sql/load_daily_orders.sql"
+    },
+    {
+      "source_script": "/scripts/example/aggregate_daily_orders.sql",
+      "target_script": "s3://${SCRIPTS_BUCKET}/spark_sql/aggregate_daily_orders.sql"
+    }
+  ]
+}

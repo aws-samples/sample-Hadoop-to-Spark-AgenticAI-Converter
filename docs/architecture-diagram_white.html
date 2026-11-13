@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hadoop to Spark SQL Converter — Architecture</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.7; }
+
+/* Header */
+.hero { background: linear-gradient(135deg, #1e3a5f 0%, #2563eb 50%, #7c3aed 100%); padding: 50px 40px; text-align: center; }
+.hero h1 { font-size: 3rem; font-weight: 800; color: #fff; margin-bottom: 14px; }
+.hero .subtitle { font-size: 1.3rem; color: #e0e7ff; max-width: 800px; margin: 0 auto; }
+.hero .badges { margin-top: 24px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.hero .badge { background: rgba(255,255,255,0.15); backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.3); padding: 8px 20px; border-radius: 24px; font-size: 1rem; color: #fff; font-weight: 600; }
+
+/* Container */
+.container { max-width: 1300px; margin: 0 auto; padding: 50px 30px; }
+
+/* Section Headers */
+.section-header { text-align: center; margin-bottom: 40px; }
+.section-header h2 { font-size: 2.4rem; font-weight: 800; color: #1e293b; margin-bottom: 10px; }
+.section-header p { color: #64748b; font-size: 1.2rem; }
+
+/* Stats Bar */
+.stats-bar { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; margin: 40px 0 60px; }
+.stat-pill { background: #fff; border: 2px solid #e2e8f0; border-radius: 16px; padding: 16px 30px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+.stat-pill .val { font-size: 1.6rem; font-weight: 800; color: #2563eb; }
+.stat-pill .lbl { font-size: 0.85rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+
+/* Architecture SVG Container */
+.arch-container { background: #e2e8f0; border-radius: 20px; padding: 50px 30px; margin-bottom: 60px; overflow-x: auto; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 2px solid #cbd5e1; }
+
+/* Pipeline Flow Cards */
+.pipeline-section { margin-bottom: 50px; background: #fff; border-radius: 16px; padding: 30px; border: 2px solid #e2e8f0; box-shadow: 0 2px 12px rgba(0,0,0,0.04); }
+.pipeline-title { font-size: 1.5rem; font-weight: 700; margin-bottom: 24px; display: flex; align-items: center; gap: 14px; color: #1e293b; }
+.pipeline-title .icon { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; }
+.pipeline-title .icon.blue { background: #dbeafe; }
+.pipeline-title .icon.purple { background: #ede9fe; }
+.pipeline-title .icon.green { background: #d1fae5; }
+.pipeline-title .icon.orange { background: #ffedd5; }
+
+/* Flow Steps */
+.flow { display: flex; align-items: center; gap: 0; flex-wrap: nowrap; overflow-x: auto; padding: 10px 0; }
+.flow-step { background: #f8fafc; border: 2px solid #cbd5e1; border-radius: 14px; padding: 18px 20px; min-width: 130px; text-align: center; position: relative; transition: transform 0.2s, box-shadow 0.2s; }
+.flow-step:hover { transform: translateY(-3px); box-shadow: 0 6px 20px rgba(0,0,0,0.1); }
+.flow-step .step-num { position: absolute; top: -12px; left: -12px; width: 28px; height: 28px; background: #2563eb; border-radius: 50%; font-size: 0.8rem; font-weight: 700; display: flex; align-items: center; justify-content: center; color: #fff; }
+.flow-step .step-title { font-weight: 700; font-size: 1rem; color: #1e293b; }
+.flow-step .step-desc { font-size: 0.85rem; color: #64748b; margin-top: 4px; }
+.flow-arrow { color: #94a3b8; font-size: 1.8rem; padding: 0 10px; flex-shrink: 0; }
+.flow-step.decision { border-color: #f59e0b; background: #fffbeb; }
+.flow-step.decision .step-num { background: #f59e0b; }
+.flow-step.output { border-color: #22c55e; background: #f0fdf4; }
+.flow-step.output .step-num { background: #22c55e; }
+.flow-step.input { border-color: #8b5cf6; background: #faf5ff; }
+.flow-step.input .step-num { background: #8b5cf6; }
+
+/* Self-correction badge */
+.self-correct { display: inline-block; background: #ef4444; color: #fff; font-size: 0.75rem; padding: 3px 10px; border-radius: 12px; margin-top: 8px; font-weight: 600; }
+
+/* Commands Section */
+.commands-section { margin-bottom: 60px; }
+.cmd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 24px; }
+.cmd-card { background: #fff; border: 2px solid #e2e8f0; border-radius: 16px; padding: 28px; transition: border-color 0.2s, box-shadow 0.2s; }
+.cmd-card:hover { border-color: #2563eb; box-shadow: 0 4px 16px rgba(37,99,235,0.1); }
+.cmd-card .cmd-title { font-size: 1.2rem; font-weight: 700; color: #1e293b; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+.cmd-card .cmd-title .emoji { font-size: 1.5rem; }
+.cmd-card .cmd-desc { font-size: 1rem; color: #64748b; margin-bottom: 16px; }
+.cmd-card .cmd-code { background: #1e293b; border-radius: 10px; padding: 14px 18px; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.9rem; color: #67e8f9; overflow-x: auto; white-space: pre; }
+.cmd-card .cmd-io { margin-top: 14px; font-size: 0.9rem; }
+.cmd-card .cmd-io .io-label { font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.75rem; }
+.cmd-card .cmd-io .io-path { color: #059669; font-family: monospace; font-size: 0.85rem; }
+
+/* Features Grid */
+.features { display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 60px; }
+.feature { background: #fff; border: 2px solid #e2e8f0; border-radius: 14px; padding: 24px; }
+.feature h4 { font-size: 1.1rem; font-weight: 700; color: #1e293b; margin-bottom: 6px; }
+.feature p { font-size: 1rem; color: #475569; }
+.feature .tag { display: inline-block; background: #ede9fe; color: #6d28d9; font-size: 0.8rem; padding: 4px 12px; border-radius: 8px; margin-top: 10px; font-weight: 600; }
+
+/* Footer */
+.footer { text-align: center; padding: 40px 20px; border-top: 2px solid #e2e8f0; color: #64748b; font-size: 1rem; }
+</style>
+</head>
+<body>
+
+<!-- HERO -->
+<div class="hero">
+    <h1>Hadoop to Spark SQL Converter</h1>
+    <div class="subtitle">Automated conversion framework for HiveQL & Impala to Spark SQL with comprehensive validation, multi-agent orchestration, and equivalence testing</div>
+    <div class="badges">
+        <span class="badge">HiveQL Conversion</span>
+        <span class="badge">Impala Conversion</span>
+        <span class="badge">MWAA Migration</span>
+        <span class="badge">Accuracy Dashboard</span>
+        <span class="badge">Equivalence Testing</span>
+    </div>
+</div>
+
+<div class="container">
+
+<!-- STATS -->
+<div class="stats-bar">
+    <div class="stat-pill"><div class="val">HiveQL + Impala</div><div class="lbl">Source Systems</div></div>
+    <div class="stat-pill"><div class="val">Spark SQL</div><div class="lbl">Target Platform</div></div>
+    <div class="stat-pill"><div class="val">8</div><div class="lbl">Accuracy Dimensions</div></div>
+    <div class="stat-pill"><div class="val">MINUS</div><div class="lbl">Equivalence Test</div></div>
+</div>
+
+<!-- ARCHITECTURE DIAGRAM -->
+<div class="section-header">
+    <h2>System Architecture</h2>
+    <p>Multi-agent orchestration with self-correction and parallel processing</p>
+</div>
+
+<div class="arch-container">
+<svg viewBox="0 0 1100 700" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:1100px;margin:0 auto;display:block;">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/></marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444"/></marker>
+  </defs>
+
+  <!-- INPUT LAYER -->
+  <rect x="20" y="30" width="210" height="175" rx="16" fill="#312e81" stroke="#818cf8" stroke-width="2"/>
+  <text x="125" y="58" text-anchor="middle" font-size="14" font-weight="700" fill="#e0e7ff">📥 INPUT SOURCES</text>
+  <rect x="40" y="72" width="170" height="34" rx="8" fill="#4338ca"/>
+  <text x="125" y="94" text-anchor="middle" font-size="12" fill="#fff">HiveQL Files (.hql)</text>
+  <rect x="40" y="114" width="170" height="34" rx="8" fill="#4338ca"/>
+  <text x="125" y="136" text-anchor="middle" font-size="12" fill="#fff">Impala Files (.sql)</text>
+  <rect x="40" y="156" width="170" height="34" rx="8" fill="#4338ca"/>
+  <text x="125" y="178" text-anchor="middle" font-size="12" fill="#fff">Control-M / Airflow</text>
+
+  <!-- ORCHESTRATOR -->
+  <rect x="290" y="20" width="360" height="210" rx="16" fill="#1e3a5f" stroke="#60a5fa" stroke-width="2.5"/>
+  <text x="470" y="50" text-anchor="middle" font-size="16" font-weight="800" fill="#93c5fd">🎯 UNIFIED ORCHESTRATOR</text>
+  <text x="470" y="72" text-anchor="middle" font-size="11" fill="#cbd5e1">Intent Router • Parallel Scheduler • Self-Correction</text>
+  
+  <rect x="305" y="86" width="105" height="30" rx="7" fill="#1e293b"/>
+  <text x="357" y="106" text-anchor="middle" font-size="10" fill="#e2e8f0">Intent Router</text>
+  <rect x="420" y="86" width="105" height="30" rx="7" fill="#1e293b"/>
+  <text x="472" y="106" text-anchor="middle" font-size="10" fill="#e2e8f0">MCP Client Pool</text>
+  <rect x="535" y="86" width="100" height="30" rx="7" fill="#1e293b"/>
+  <text x="585" y="106" text-anchor="middle" font-size="10" fill="#e2e8f0">State Store</text>
+  <rect x="305" y="124" width="105" height="30" rx="7" fill="#1e293b"/>
+  <text x="357" y="144" text-anchor="middle" font-size="10" fill="#e2e8f0">Parallel Exec</text>
+  <rect x="420" y="124" width="105" height="30" rx="7" fill="#1e293b"/>
+  <text x="472" y="144" text-anchor="middle" font-size="10" fill="#e2e8f0">LLM Dispatch</text>
+  <rect x="535" y="124" width="100" height="30" rx="7" fill="#1e293b" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="585" y="144" text-anchor="middle" font-size="10" fill="#fca5a5">Self-Correct</text>
+
+  <!-- Intent pills -->
+  <rect x="305" y="164" width="80" height="22" rx="11" fill="#2563eb"/>
+  <text x="345" y="179" text-anchor="middle" font-size="9" fill="#fff" font-weight="600">hive_only</text>
+  <rect x="392" y="164" width="80" height="22" rx="11" fill="#7c3aed"/>
+  <text x="432" y="179" text-anchor="middle" font-size="9" fill="#fff" font-weight="600">impala_only</text>
+  <rect x="479" y="164" width="72" height="22" rx="11" fill="#059669"/>
+  <text x="515" y="179" text-anchor="middle" font-size="9" fill="#fff" font-weight="600">mwaa_only</text>
+  <rect x="558" y="164" width="68" height="22" rx="11" fill="#d97706"/>
+  <text x="592" y="179" text-anchor="middle" font-size="9" fill="#fff" font-weight="600">test_only</text>
+  <rect x="305" y="192" width="85" height="20" rx="10" fill="#475569"/>
+  <text x="347" y="206" text-anchor="middle" font-size="8" fill="#fff">full_pipeline</text>
+  <rect x="396" y="192" width="85" height="20" rx="10" fill="#475569"/>
+  <text x="438" y="206" text-anchor="middle" font-size="8" fill="#fff">accuracy_only</text>
+
+  <!-- MCP SERVERS LAYER -->
+  <rect x="30" y="265" width="195" height="95" rx="14" fill="#2563eb"/>
+  <text x="127" y="293" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">hive-converter</text>
+  <text x="127" y="312" text-anchor="middle" font-size="10" fill="#bfdbfe">7 tools • LLM-required</text>
+  <text x="127" y="330" text-anchor="middle" font-size="9" fill="#dbeafe">identify • generate • validate</text>
+  <text x="127" y="347" text-anchor="middle" font-size="9" fill="#dbeafe">chunk • merge • fix • mermaid</text>
+
+  <rect x="240" y="265" width="195" height="95" rx="14" fill="#7c3aed"/>
+  <text x="337" y="293" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">impala-converter</text>
+  <text x="337" y="312" text-anchor="middle" font-size="10" fill="#e9d5ff">7 tools • LLM-required</text>
+  <text x="337" y="330" text-anchor="middle" font-size="9" fill="#f3e8ff">identify • generate • validate</text>
+  <text x="337" y="347" text-anchor="middle" font-size="9" fill="#f3e8ff">chunk • merge • fix • mermaid</text>
+
+  <rect x="450" y="265" width="195" height="95" rx="14" fill="#059669"/>
+  <text x="547" y="293" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">mwaa-converter</text>
+  <text x="547" y="312" text-anchor="middle" font-size="10" fill="#a7f3d0">10 tools • LLM + Determ.</text>
+  <text x="547" y="330" text-anchor="middle" font-size="9" fill="#d1fae5">parse • plan • generate</text>
+  <text x="547" y="347" text-anchor="middle" font-size="9" fill="#d1fae5">Control-M + Airflow DAGs</text>
+
+  <rect x="660" y="265" width="175" height="95" rx="14" fill="#0891b2"/>
+  <text x="747" y="293" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">accuracy-calculator</text>
+  <text x="747" y="312" text-anchor="middle" font-size="10" fill="#a5f3fc">3 tools • Deterministic</text>
+  <text x="747" y="330" text-anchor="middle" font-size="9" fill="#cffafe">analyze • report • dashboard</text>
+  <text x="747" y="347" text-anchor="middle" font-size="9" fill="#cffafe">8-dimension scoring</text>
+
+  <rect x="850" y="265" width="220" height="95" rx="14" fill="#d97706"/>
+  <text x="960" y="293" text-anchor="middle" font-size="13" font-weight="700" fill="#fff">test-orch + execution</text>
+  <text x="960" y="312" text-anchor="middle" font-size="10" fill="#fef3c7">12 tools • LLM-required</text>
+  <text x="960" y="330" text-anchor="middle" font-size="9" fill="#fef9c3">DDL • data-gen • exec • compare</text>
+  <text x="960" y="347" text-anchor="middle" font-size="9" fill="#fef9c3">MINUS validation • report</text>
+
+  <!-- CONNECTIONS -->
+  <line x1="230" y1="120" x2="290" y2="120" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="370" y1="230" x2="127" y2="265" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="420" y1="230" x2="337" y2="265" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="470" y1="230" x2="547" y2="265" stroke="#059669" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="520" y1="230" x2="747" y2="265" stroke="#0891b2" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="570" y1="230" x2="960" y2="265" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- LLM ENGINE -->
+  <rect x="30" y="405" width="440" height="85" rx="16" fill="#831843" stroke="#ec4899" stroke-width="2"/>
+  <text x="250" y="437" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">🤖 LLM Engine (Kiro / Claude)</text>
+  <text x="250" y="459" text-anchor="middle" font-size="10" fill="#fce7f3">Steering Files • Skills • 25+ Conversion Rules</text>
+  <text x="250" y="477" text-anchor="middle" font-size="10" fill="#fce7f3">MCP returns prompt → LLM executes with rules</text>
+
+  <!-- Connections: Servers to LLM -->
+  <line x1="127" y1="360" x2="150" y2="405" stroke="#ec4899" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <line x1="337" y1="360" x2="230" y2="405" stroke="#ec4899" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <line x1="547" y1="360" x2="330" y2="405" stroke="#ec4899" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <line x1="960" y1="360" x2="420" y2="405" stroke="#ec4899" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+
+  <!-- CONTAINER LAYER -->
+  <rect x="510" y="405" width="560" height="85" rx="16" fill="#14532d" stroke="#22c55e" stroke-width="2"/>
+  <text x="790" y="434" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">🐳 Finch Container Runtime</text>
+  <rect x="545" y="450" width="150" height="32" rx="9" fill="#166534" stroke="#4ade80" stroke-width="1.5"/>
+  <text x="620" y="471" text-anchor="middle" font-size="11" fill="#fff">Spark 3.5 :4040</text>
+  <rect x="715" y="450" width="150" height="32" rx="9" fill="#166534" stroke="#4ade80" stroke-width="1.5"/>
+  <text x="790" y="471" text-anchor="middle" font-size="11" fill="#fff">Hive 4.0 :10000</text>
+  <rect x="885" y="450" width="160" height="32" rx="9" fill="#166534" stroke="#4ade80" stroke-width="1.5"/>
+  <text x="965" y="471" text-anchor="middle" font-size="11" fill="#fff">Spark (test) :4041</text>
+
+  <!-- OUTPUT LAYER -->
+  <rect x="20" y="530" width="1060" height="110" rx="16" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="550" y="557" text-anchor="middle" font-size="15" font-weight="700" fill="#166534">📤 OUTPUTS</text>
+
+  <rect x="45" y="570" width="235" height="55" rx="12" fill="#fff" stroke="#2563eb" stroke-width="2"/>
+  <text x="162" y="593" text-anchor="middle" font-size="12" font-weight="700" fill="#1e40af">Spark SQL Output</text>
+  <text x="162" y="611" text-anchor="middle" font-size="10" fill="#2563eb">output/{hive,impala}/spark_sql/*.sql</text>
+
+  <rect x="300" y="570" width="235" height="55" rx="12" fill="#fff" stroke="#0891b2" stroke-width="2"/>
+  <text x="417" y="593" text-anchor="middle" font-size="12" font-weight="700" fill="#155e75">Accuracy Dashboard</text>
+  <text x="417" y="611" text-anchor="middle" font-size="10" fill="#0891b2">output/hive/accuracy/dashboard.html</text>
+
+  <rect x="555" y="570" width="250" height="55" rx="12" fill="#fff" stroke="#d97706" stroke-width="2"/>
+  <text x="680" y="593" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">HiveQL Test Reports</text>
+  <text x="680" y="611" text-anchor="middle" font-size="10" fill="#b45309">output/testing/reports/</text>
+
+  <rect x="825" y="570" width="235" height="55" rx="12" fill="#fff" stroke="#059669" stroke-width="2"/>
+  <text x="942" y="593" text-anchor="middle" font-size="12" font-weight="700" fill="#065f46">MWAA DAGs</text>
+  <text x="942" y="611" text-anchor="middle" font-size="10" fill="#059669">output/mwaa/dags/*.py</text>
+
+  <!-- Self-Correction Arrow -->
+  <path d="M 585 154 Q 720 154 720 230 Q 720 255 640 265" fill="none" stroke="#ef4444" stroke-width="2" stroke-dasharray="6 3" marker-end="url(#arrow-red)"/>
+  <text x="740" y="220" font-size="10" fill="#dc2626" font-weight="600">retry ×3</text>
+
+  <!-- Legend -->
+  <rect x="40" y="650" width="1020" height="36" rx="9" fill="#334155"/>
+  <text x="65" y="673" font-size="10" fill="#e2e8f0" font-weight="600">Legend:</text>
+  <rect x="125" y="663" width="14" height="14" rx="4" fill="#2563eb"/><text x="145" y="675" font-size="10" fill="#e2e8f0">HiveQL</text>
+  <rect x="200" y="663" width="14" height="14" rx="4" fill="#7c3aed"/><text x="220" y="675" font-size="10" fill="#e2e8f0">Impala</text>
+  <rect x="275" y="663" width="14" height="14" rx="4" fill="#059669"/><text x="295" y="675" font-size="10" fill="#e2e8f0">MWAA</text>
+  <rect x="345" y="663" width="14" height="14" rx="4" fill="#0891b2"/><text x="365" y="675" font-size="10" fill="#e2e8f0">Accuracy</text>
+  <rect x="435" y="663" width="14" height="14" rx="4" fill="#d97706"/><text x="455" y="675" font-size="10" fill="#e2e8f0">Testing</text>
+  <rect x="510" y="663" width="14" height="14" rx="4" fill="#831843"/><text x="530" y="675" font-size="10" fill="#e2e8f0">LLM Engine</text>
+  <rect x="610" y="663" width="14" height="14" rx="4" fill="#14532d"/><text x="630" y="675" font-size="10" fill="#e2e8f0">Containers</text>
+  <rect x="710" y="663" width="14" height="14" rx="4" fill="#ef4444"/><text x="730" y="675" font-size="10" fill="#e2e8f0">Self-Correction</text>
+</svg>
+</div>
+
+<!-- PIPELINE FLOWS -->
+<div class="section-header">
+    <h2>Pipeline Flows</h2>
+    <p>Each intent executes a specific sequence of stages with self-correction</p>
+</div>
+
+<!-- HiveQL Pipeline -->
+<div class="pipeline-section">
+    <div class="pipeline-title"><div class="icon blue">🔵</div> HiveQL Conversion Pipeline (--intent hive_only)</div>
+    <div class="flow">
+        <div class="flow-step input"><div class="step-num">1</div><div class="step-title">HiveQL Input</div><div class="step-desc">.hql / .txt files</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">2</div><div class="step-title">Analyze</div><div class="step-desc">Detect complexity</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">3</div><div class="step-title">Chunk + Convert</div><div class="step-desc">13 conversion rules</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step decision"><div class="step-num">4</div><div class="step-title">Validate</div><div class="step-desc">Syntax + semantic</div><div class="self-correct">auto-fix ×3</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">5</div><div class="step-title">Execute</div><div class="step-desc">Spark container</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">6</div><div class="step-title">Accuracy</div><div class="step-desc">8-dimension score</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step output"><div class="step-num">7</div><div class="step-title">Dashboard</div><div class="step-desc">HTML report</div></div>
+    </div>
+</div>
+
+<!-- Impala Pipeline -->
+<div class="pipeline-section">
+    <div class="pipeline-title"><div class="icon purple">🟣</div> Impala Conversion Pipeline (--intent impala_only)</div>
+    <div class="flow">
+        <div class="flow-step input"><div class="step-num">1</div><div class="step-title">Impala Input</div><div class="step-desc">.sql files</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">2</div><div class="step-title">Analyze</div><div class="step-desc">NDV, Kudu, hints</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">3</div><div class="step-title">Convert</div><div class="step-desc">12 Impala rules</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step decision"><div class="step-num">4</div><div class="step-title">Validate</div><div class="step-desc">No NDV/APPX remaining</div><div class="self-correct">auto-fix ×3</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">5</div><div class="step-title">Execute</div><div class="step-desc">Spark container</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">6</div><div class="step-title">Accuracy</div><div class="step-desc">8-dimension score</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step output"><div class="step-num">7</div><div class="step-title">Dashboard</div><div class="step-desc">Impala-specific</div></div>
+    </div>
+</div>
+
+<!-- Test Pipeline -->
+<div class="pipeline-section">
+    <div class="pipeline-title"><div class="icon orange">🟠</div> HiveQL Equivalence Testing Pipeline (--intent test_only)</div>
+    <div class="flow">
+        <div class="flow-step input"><div class="step-num">1</div><div class="step-title">Source + Spark</div><div class="step-desc">Matching pairs</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">2</div><div class="step-title">DDL Extract</div><div class="step-desc">Infer schemas</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">3</div><div class="step-title">Data Gen</div><div class="step-desc">WHERE literals</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">4</div><div class="step-title">Start Containers</div><div class="step-desc">Hive + Spark</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step"><div class="step-num">5</div><div class="step-title">Execute Both</div><div class="step-desc">Same data, both engines</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step decision"><div class="step-num">6</div><div class="step-title">MINUS Check</div><div class="step-desc">EXCEPT both dirs</div></div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step output"><div class="step-num">7</div><div class="step-title">Test Report</div><div class="step-desc">PASS / FAIL</div></div>
+    </div>
+</div>
+
+<!-- COMMANDS SECTION -->
+<div class="section-header" style="margin-top:60px;">
+    <h2>Orchestrator Commands</h2>
+    <p>All commands run from the project root with virtual environment activated</p>
+</div>
+
+<div class="commands-section">
+<div class="cmd-grid">
+
+<div class="cmd-card">
+    <div class="cmd-title"><span class="emoji">🔵</span> HiveQL Conversion</div>
+    <div class="cmd-desc">Convert HiveQL files to Spark SQL with accuracy dashboard</div>
+    <div class="cmd-code">python -m orchestrator.orchestrator_agent --intent hive_only</div>
+    <div class="cmd-io">
+        <div><span class="io-label">Input: </span><span class="io-path">input/hive/*.hql</span></div>
+        <div><span class="io-label">Output: </span><span class="io-path">output/hive/spark_sql/*.sql</span></div>
+        <div><span class="io-label">Report: </span><span class="io-path">output/hive/accuracy/dashboard.html</span></div>
+    </div>
+</div>
+
+<div class="cmd-card">
+    <div class="cmd-title"><span class="emoji">🟣</span> Impala Conversion</div>
+    <div class="cmd-desc">Convert Impala SQL files to Spark SQL</div>
+    <div class="cmd-code">python -m orchestrator.orchestrator_agent --intent impala_only</div>
+    <div class="cmd-io">
+        <div><span class="io-label">Input: </span><span class="io-path">input/impala/*.sql</span></div>
+        <div><span class="io-label">Output: </span><span class="io-path">output/impala/spark_sql/*.sql</span></div>
+    </div>
+</div>
+
+<div class="cmd-card">
+    <div class="cmd-title"><span class="emoji">🧪</span> HiveQL Equivalence Testing</div>
+    <div class="cmd-desc">Run Hive vs Spark equivalence testing with MINUS validation</div>
+    <div class="cmd-code">python -m orchestrator.orchestrator_agent --intent test_only</div>
+    <div class="cmd-io">
+        <div><span class="io-label">Source: </span><span class="io-path">input/hive/*.hql</span></div>
+        <div><span class="io-label">Target: </span><span class="io-path">output/hive/spark_sql/*.sql</span></div>
+        <div><span class="io-label">Containers: </span><span class="io-path">Hive 4.0 + Spark 3.5 (Finch)</span></div>
+    </div>
+</div>
+
+<div class="cmd-card">
+    <div class="cmd-title"><span class="emoji">🟢</span> MWAA Conversion</div>
+    <div class="cmd-desc">Convert Control-M XML or Airflow DAGs to MWAA</div>
+    <div class="cmd-code">python -m orchestrator.orchestrator_agent --intent mwaa_only</div>
+    <div class="cmd-io">
+        <div><span class="io-label">Input: </span><span class="io-path">input/mwaa/control_m/*.xml</span></div>
+        <div><span class="io-label">Output: </span><span class="io-path">output/mwaa/dags/*.py</span></div>
+    </div>
+</div>
+
+<div class="cmd-card">
+    <div class="cmd-title"><span class="emoji">🔄</span> Full Pipeline</div>
+    <div class="cmd-desc">HiveQL conversion + MWAA conversion in one run</div>
+    <div class="cmd-code">python -m orchestrator.orchestrator_agent --intent full_pipeline</div>
+    <div class="cmd-io">
+        <div><span class="io-label">Phase 1: </span><span class="io-path">HiveQL → Spark SQL (all files)</span></div>
+        <div><span class="io-label">Phase 2: </span><span class="io-path">Control-M → MWAA DAGs</span></div>
+    </div>
+</div>
+
+</div>
+</div>
+
+<!-- FEATURES -->
+<div class="section-header">
+    <h2>Key Capabilities</h2>
+</div>
+<div class="features">
+    <div class="feature"><h4>Fidelity-Focused Conversion</h4><p>Designed to preserve source logic, transformations and columns. Each conversion is checked by validation, accuracy scoring and equivalence testing, and should be reviewed before use.</p><span class="tag">HiveQL + Impala</span></div>
+    <div class="feature"><h4>Parallel Processing</h4><p>Multiple files processed simultaneously with async concurrency. Large files chunked automatically.</p><span class="tag">3-5 concurrent</span></div>
+    <div class="feature"><h4>Self-Correction Loop</h4><p>Automatic error detection and fix (max 3 attempts). Triggers on low accuracy or validation failure.</p><span class="tag">Autonomous</span></div>
+    <div class="feature"><h4>MINUS Equivalence Check</h4><p>Execute SQL in both engines (Hive + Spark) on generated test data, run EXCEPT both directions. 0 rows = same results for that data.</p><span class="tag">Equivalence Testing</span></div>
+    <div class="feature"><h4>Separate Reports</h4><p>HiveQL and Impala get isolated accuracy dashboards. Test reports are per-query with detailed analysis.</p><span class="tag">Reporting</span></div>
+</div>
+
+</div>
+
+<div class="footer">
+    Hadoop to Spark SQL Converter Framework — HiveQL • Impala • MWAA Workflow Migration<br>
+    Built for Enterprise Hadoop to Spark Migration at Scale
+</div>
+
+</body>
+</html>

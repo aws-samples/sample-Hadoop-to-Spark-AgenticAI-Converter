@@ -1,0 +1,832 @@
+parse_control_m_xml:
+  description: "Parse Control-M XML export into structured JobIR JSON — handles all real-world Control-M patterns"
+  prompt: |
+    You are a senior AWS migration engineer with deep expertise in Control-M Enterprise Manager and Amazon MWAA.
+    Your task is to parse a Control-M XML export and produce a structured JobIR JSON that will be used to generate MWAA DAGs.
+
+    CONTROL-M XML CONTENT:
+    {job_definition}
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 1: XML STRUCTURE REFERENCE
+    ═══════════════════════════════════════════════════════════════
+
+    ROOT ELEMENTS:
+    - <DEFTABLE>: Root container
+    - <SMART_FOLDER> / <FOLDER>: Workflow container (= one DAG)
+      Attributes: FOLDER_NAME, JOBNAME, APPLICATION, SUB_APPLICATION,
+                  DATACENTER, PLATFORM, TIMEFROM, DAYS, JOBS_IN_GROUP
+
+    JOB ELEMENT (<JOB>):
+    Core attributes:
+      JOBNAME         — unique job identifier within folder (REQUIRED)
+      TASKTYPE        — "Job" | "Dummy" | "Command" | "SMART Table"
+      APPL_TYPE       — "OS" | "AWS" | "Database" | "SAP" | "PeopleSoft"
+      APPL_FORM       — "AWS" for AWS-native jobs
+      NODEID          — execution agent (e.g. "AWS_CLI_AG", "UNIX_AG")
+      RUN_AS          — OS/IAM user
+      DESCRIPTION     — human-readable description
+      PARENT_FOLDER   — which SMART_FOLDER this job belongs to
+      END_FOLDER      — "Y" if last job in folder
+      MEMNAME         — script filename (e.g. "extract.hql")
+      MEMLIB          — script library path (e.g. "/scripts/etl")
+      CMDLINE         — full command line (e.g. "hive -f /scripts/extract.hql")
+
+    CHILD ELEMENTS:
+    <VARIABLE NAME="%%VAR_NAME" VALUE="value"/>
+      — Job-level variables. Strip leading %% from NAME.
+      — Common patterns:
+          %%SCRIPT_PATH → script file path
+          %%AWS-SERVICE_TYPE → LAMBDA | EMR | GLUE | STEP_FUNCTIONS
+          %%AWS-LAMBDA_NAME → Lambda function name
+          %%AWS-EMR_CLUSTER_ID → EMR cluster ID
+          %%S3_INPUT / %%S3_OUTPUT → S3 data paths
+          %%TARGET_TABLE → destination table name
+          %%ENV → environment (PROD/UAT/DEV)
+
+    <INCOND NAME="SOURCE_JOB-TO-TARGET_JOB" ODATE="ODAT" AND_OR="A"/>
+      — Input condition = this job depends on SOURCE_JOB completing
+      — Parse NAME: split on "-TO-", left side is the upstream job
+      — AND_OR="A" means AND (all conditions must be met)
+      — AND_OR="O" means OR (any condition sufficient)
+      — ODATE="STAT" means static/permanent condition (not date-based)
+
+    <OUTCOND NAME="SOURCE_JOB-TO-TARGET_JOB" ODATE="ODAT" SIGN="+"/>
+      — Output condition this job sets on completion
+      — SIGN="+" means success condition
+      — SIGN="-" means cleanup/reset condition
+
+    <ON STMT="*" CODE="NOTOK"> / <ON STMT="*" CODE="OK">
+      — Event handlers for success/failure
+      — May contain <DOMAIL> for email notifications
+
+    <RULE_BASED_CALENDAR NAME="BUSINESS_DAYS" WEEKDAYS="12345"/>
+      — Schedule definition: WEEKDAYS="12345" = Mon-Fri
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 2: JOB TYPE CLASSIFICATION RULES
+    ═══════════════════════════════════════════════════════════════
+
+    Classify each job using this decision tree:
+
+    1. TASKTYPE="Dummy" → job_type = "dummy"
+       (sentinel/marker jobs, no execution, maps to EmptyOperator)
+
+    2. TASKTYPE="Job" AND APPL_TYPE="AWS":
+       Check %%AWS-SERVICE_TYPE variable:
+       - "LAMBDA" → job_type = "aws_lambda"
+       - "EMR" → job_type = "emr_serverless" (if no cluster ID) or "emr_add_steps" (if cluster ID present)
+       - "GLUE" → job_type = "aws_glue"
+       - "STEP_FUNCTIONS" → job_type = "aws_step_functions"
+       - Not set → job_type = "aws_lambda" (default for AWS jobs)
+
+    3. TASKTYPE="Job" AND APPL_TYPE="OS":
+       Check MEMNAME/MEMLIB/CMDLINE for script type:
+       - .hql or .sql extension → job_type = "script", script_type = "hql"/"sql"
+       - .py extension → job_type = "script", script_type = "py"
+       - .sh/.ksh extension → job_type = "script", script_type = "sh"/"ksh"
+       - No script detected → job_type = "command"
+
+    4. TASKTYPE="Command" → job_type = "command"
+       Extract script from CMDLINE using these patterns:
+       - "hive -f /path/file.hql" → script_path="/path/file.hql", script_type="hql"
+       - "spark-submit /path/file.py" → script_path="/path/file.py", script_type="py"
+       - "python3 /path/file.py" → script_path="/path/file.py", script_type="py"
+       - "bash /path/file.sh" → script_path="/path/file.sh", script_type="sh"
+       - "beeline -f /path/file.sql" → script_path="/path/file.sql", script_type="sql"
+
+    5. TASKTYPE="SMART Table" → job_type = "sub_flow"
+       (nested folder reference, maps to TriggerDagRunOperator)
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 3: DEPENDENCY EXTRACTION RULES
+    ═══════════════════════════════════════════════════════════════
+
+    For each job, collect ALL <INCOND> elements:
+    - Parse NAME attribute: "UPSTREAM_JOB-TO-THIS_JOB"
+    - The part BEFORE "-TO-" is the upstream job name
+    - The part AFTER "-TO-" must match this job's JOBNAME
+    - Add upstream job name to dependencies[] array
+    - Handle multi-condition jobs (AND_OR="A" = all must complete)
+    - ODATE="STAT" conditions are permanent prerequisites — include them
+
+    Cross-folder dependencies:
+    - If the upstream job name does NOT exist in this SMART_FOLDER,
+      mark it as an external dependency in metadata.external_dependencies[]
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 4: SCRIPT PATH EXTRACTION PRIORITY
+    ═══════════════════════════════════════════════════════════════
+
+    Extract script_path using this priority order:
+    1. %%SCRIPT_PATH variable value
+    2. MEMLIB + "/" + MEMNAME (if both present)
+    3. MEMNAME alone (if MEMLIB absent)
+    4. Regex extraction from CMDLINE:
+       - Pattern: r'(?:-f|-file|spark-submit|python[23]?|bash|ksh)\s+(\S+\.(?:hql|sql|py|sh|ksh))'
+       - Also check for bare file paths: r'(\S+\.(?:hql|sql|py|sh|ksh))\b'
+    5. null if no script found
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 5: VARIABLE HANDLING
+    ═══════════════════════════════════════════════════════════════
+
+    For each <VARIABLE> element:
+    - Strip leading %% from NAME
+    - Include ALL variables in the variables{} dict
+    - Do NOT filter out any variables — the planner will decide which become Airflow Variables
+    - Preserve original values exactly
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 6: REQUIRED OUTPUT FORMAT
+    ═══════════════════════════════════════════════════════════════
+
+    You MUST produce one JSON object per SMART_FOLDER with this EXACT schema.
+    Do NOT deviate from field names. Do NOT add extra nesting.
+
+    For each SMART_FOLDER, output:
+    ```json
+    {
+      "folder": "<FOLDER_NAME or JOBNAME attribute>",
+      "application": "<APPLICATION attribute>",
+      "sub_application": "<SUB_APPLICATION attribute>",
+      "schedule": {
+        "days": "<DAYS attribute value — e.g. 12345, 1, ALL, or null if absent>",
+        "timefrom": "<TIMEFROM attribute value — e.g. 2200, 0600, or null if absent>",
+        "calendar": "<RULE_BASED_CALENDAR NAME attribute or null>"
+      },
+      "jobs": [
+        {
+          "job_id": "<JOBNAME>",
+          "job_name": "<JOBNAME>",
+          "job_type": "<command|script|dummy|aws_lambda|emr_serverless|emr_add_steps|aws_glue|sub_flow>",
+          "description": "<DESCRIPTION attribute or empty string>",
+          "command": "<CMDLINE value or null>",
+          "script_path": "<extracted script path or null>",
+          "script_type": "<hql|sql|py|sh|ksh|null>",
+          "folder": "<PARENT_FOLDER or SMART_FOLDER name>",
+          "application": "<APPLICATION>",
+          "sub_application": "<SUB_APPLICATION>",
+          "run_as": "<RUN_AS>",
+          "dependencies": ["<upstream_job_name_1>", "<upstream_job_name_2>"],
+          "variables": {
+            "<VAR_NAME_without_%%>": "<VALUE>"
+          },
+          "metadata": {
+            "task_type": "<TASKTYPE>",
+            "appl_type": "<APPL_TYPE>",
+            "node_id": "<NODEID>",
+            "external_dependencies": ["<cross-folder upstream job names>"]
+          }
+        }
+      ]
+    }
+    ```
+
+    CRITICAL RULES:
+    - Every job in the XML MUST appear in the output — no jobs may be skipped
+    - "dependencies" must only contain job names that are INCOND predecessors
+    - "job_type" must be one of the exact strings listed above
+    - "script_type" must be one of: "hql", "sql", "py", "sh", "ksh", or null
+    - "variables" keys must NOT have %% prefix
+    - "dependencies" must be a JSON array (even if empty: [])
+    - "variables" must be a JSON object (even if empty: {})
+    - "metadata" must be a JSON object with at minimum task_type, appl_type, node_id
+
+    COMPLETENESS CHECK:
+    Before outputting, verify:
+    ✓ Number of jobs in output matches number of <JOB> elements in XML
+    ✓ Every job has a non-empty job_id
+    ✓ Every job has a valid job_type
+    ✓ All INCOND dependencies are captured
+    ✓ All variables are included
+
+generate_conversion_plan:
+  description: "Generate MWAA ConversionPlan from JobIR — handles all AWS operator patterns, schedule conversion, cross-DAG dependencies"
+  prompt: |
+    You are a senior AWS solutions architect specialising in Amazon MWAA and Control-M migrations.
+    Your task is to produce a complete ConversionPlan JSON that will be used to generate MWAA DAGs that are syntactically valid and ready for human review.
+
+    CHUNK INFORMATION:
+    - Chunk ID: {chunk_id}
+    - Source Folder: {folder}
+    - Job Count: {job_count}
+
+    JOB IR (parsed from Control-M XML):
+    {jobs_json}
+
+    OPERATOR MAP (deterministic rules — follow these exactly):
+    {operator_map}
+
+    SPARK SQL MAPPING (source script → target S3 path):
+    {spark_sql_mapping}
+
+    DAG DEFAULTS:
+    {dag_defaults}
+
+    AIRFLOW VARIABLE NAMES (use these exact names in the plan):
+      EMR App ID variable:        {var_emr_app_id}
+      EMR Exec Role ARN variable: {var_emr_exec_role_arn}
+      Scripts bucket variable:    {var_scripts_bucket}
+      Logs bucket variable:       {var_logs_bucket}
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 1: OPERATOR SELECTION RULES
+    ═══════════════════════════════════════════════════════════════
+
+    Follow the OPERATOR MAP exactly for standard cases.
+    For edge cases not in the map, apply these rules:
+
+    HQL/SQL scripts (job_type=command/script/aws_lambda, script_type=hql/sql):
+      → EmrServerlessStartJobOperator
+      → entryPoint = Variable.get('{var_scripts_bucket}') + "/" + <relative_script_path>
+      → Look up source_script in SPARK SQL MAPPING to get target S3 path
+      → If not in mapping, derive: spark_sql/<stem>.sql
+
+    Python scripts (script_type=py):
+      → EmrServerlessStartJobOperator
+      → entryPoint = Variable.get('{var_scripts_bucket}') + "/" + <relative_script_path>
+
+    Shell scripts (script_type=sh/ksh/bash):
+      → BashOperator
+      → bash_command = the CMDLINE value from the job
+
+    Dummy/sentinel jobs (job_type=dummy):
+      → EmptyOperator
+      → No script, no configuration needed
+
+    AWS Lambda jobs (job_type=aws_lambda) with no script:
+      → EmrServerlessStartJobOperator (Lambda was wrapping Spark — replace with direct EMR call)
+      → Use %%SCRIPT_PATH variable if present for entryPoint
+
+    Sub-flow / nested folder (job_type=sub_flow):
+      → TriggerDagRunOperator
+      → trigger_dag_id = safe_dag_id(%%SUB_FLOW_NAME variable value, or folder_name of sub_flow)
+      → You MUST set "trigger_dag_id" as an explicit field on the task dict (not just in conversion_notes)
+
+    Jobs with %%AWS-EMR_CLUSTER_ID variable:
+      → EmrAddStepsOperator (EC2-based EMR, not Serverless)
+
+    Jobs with %%AWS-GLUE_JOB_NAME variable:
+      → GlueJobOperator (note: import from airflow.providers.amazon.aws.operators.glue)
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 2: SCRIPT PATH RESOLUTION
+    ═══════════════════════════════════════════════════════════════
+
+    For each job with a script_path:
+    1. Look up source_script in SPARK SQL MAPPING
+    2. If found: use the target_script value
+    3. If not found: derive target path as:
+       - HQL → spark_sql/<stem>.sql
+       - SQL → spark_sql/<stem>.sql
+       - PY  → python/<stem>.py
+       - SH  → scripts/<stem>.sh
+
+    The "script_path" field in the task must be the RELATIVE path
+    (strip the s3://bucket-name/ prefix from target_script).
+    Example: s3://${MWAA_SCRIPTS_BUCKET}/spark_sql/extract.sql → spark_sql/extract.sql
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 3: DEPENDENCY MAPPING
+    ═══════════════════════════════════════════════════════════════
+
+    For each job's dependencies[] list:
+    1. Convert each upstream job_name to a safe task_id:
+       safe_task_id = lowercase, replace non-alphanumeric with _, strip leading/trailing _
+    2. If the upstream job exists in THIS folder → add to dependencies[] as a direct task dependency
+    3. If the upstream job is in a DIFFERENT folder (metadata.external_dependencies):
+       → Do NOT add an ExternalTaskSensor as a separate task in the tasks array
+       → Instead, add an entry to this task's external_dependencies[] array:
+         {
+           "external_dag_id": "<safe_dag_id of the upstream folder>",
+           "external_task_id": "<safe_task_id of the upstream job>",
+           "source_folder": "<upstream folder name>",
+           "source_job_id": "<upstream job name>"
+         }
+       → The DAG builder will automatically render ExternalTaskSensor tasks from external_dependencies
+       → Do NOT count ExternalTaskSensor entries in total_tasks — they are rendered automatically
+
+    4. OR conditions (AND_OR="O" in source):
+       If a job has ANY INCOND with AND_OR="O", set "trigger_rule": "one_success" on that task.
+       This means the task starts when ANY one of its upstream tasks completes successfully.
+       If all INCONDs are AND_OR="A" (or not set), do NOT set trigger_rule (default all_success).
+
+    IMPORTANT: total_tasks and source_job_count must BOTH equal the number of source jobs.
+    Never add extra tasks for sensors — external_dependencies handles this automatically.
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 4: SCHEDULE CONVERSION
+    ═══════════════════════════════════════════════════════════════
+
+    The JobIR now includes a top-level "schedule" object with "days", "timefrom", and "calendar".
+    Convert these Control-M schedule fields to an Airflow cron expression:
+
+    - days="12345" + timefrom="2200"  → "0 22 * * 1-5"  (business days at 22:00)
+    - days="1"     + timefrom="0600"  → "0 6 1 * *"     (1st of month at 06:00)
+    - days="1-7"   + timefrom="0600"  → "0 6 * * *"     (daily at 06:00)
+    - days="ALL"   + timefrom="HHMM"  → "0 HH * * *"    (daily)
+    - timefrom="HHMM": hour = first 2 digits, minute = last 2 digits
+    - No days/timefrom defined        → null             (manual/external trigger)
+
+    Add a schedule_notes field explaining the conversion decision.
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 5: AIRFLOW VARIABLES
+    ═══════════════════════════════════════════════════════════════
+
+    Collect ALL environment values that must become Airflow Variables:
+    1. Infrastructure variables (always include):
+       - {var_emr_app_id}: EMR Serverless Application ID
+       - {var_emr_exec_role_arn}: EMR Serverless Execution Role ARN
+       - {var_scripts_bucket}: S3 prefix for scripts
+       - {var_logs_bucket}: S3 prefix for EMR logs
+
+    2. Job-specific variables (from each job's variables dict):
+       - Skip: AWS-SERVICE_TYPE, AWS-LAMBDA_NAME, AWS-LAMBDA_PAYLOAD_TYPE, AWS-ACCOUNT
+         (these are Control-M internal, not needed in MWAA)
+       - Include: ENV, S3_INPUT, S3_OUTPUT, TARGET_TABLE, SCRIPT_PATH, and any custom vars
+       - Use descriptive variable names: <JOB_NAME>_<VAR_NAME> to avoid conflicts
+       - Set value to "__PLACEHOLDER__" — customer fills in actual values
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 6: REQUIRED OUTPUT FORMAT
+    ═══════════════════════════════════════════════════════════════
+
+    You MUST produce a JSON object with this EXACT schema.
+    Do NOT deviate from field names. Every field listed is REQUIRED.
+
+    ```json
+    {
+      "chunk_id": "<chunk_id>",
+      "folder": "<folder_name>",
+      "source_type": "control_m",
+      "dag_config": {
+        "dag_id": "<safe_dag_id — lowercase, underscores only>",
+        "schedule": "<cron string or null>",
+        "schedule_notes": "<explanation of schedule conversion>",
+        "start_date": "2024-01-01",
+        "catchup": false,
+        "tags": ["control_m_migration", "<application>", "<sub_application>"],
+        "default_args": {
+          "owner": "airflow",
+          "depends_on_past": false,
+          "email_on_failure": true,
+          "email_on_retry": false,
+          "retries": 1,
+          "retry_delay_minutes": 5
+        }
+      },
+      "tasks": [
+        {
+          "task_id": "<safe_task_id — lowercase, underscores only>",
+          "source_job_id": "<original JOBNAME>",
+          "source_job_name": "<original JOBNAME>",
+          "source_job_type": "<job_type from JobIR>",
+          "description": "<job description>",
+          "operator": "<emr_serverless|emr_add_steps|bash|python|dummy|external_task_sensor|trigger_dag_run>",
+          "script_path": "<relative path — no s3://bucket prefix>",
+          "source_script": "<original script path from Control-M>",
+          "target_script": "<full S3 URI from spark_sql_mapping or derived>",
+          "script_type": "<hql|sql|py|sh|ksh|null>",
+          "dependencies": ["<upstream_task_id_1>", "<upstream_task_id_2>"],
+          "external_dependencies": [],
+          "bash_command": "<only for BashOperator — the command string>",
+          "trigger_rule": "<only for OR conditions — 'one_success', omit for AND conditions>",
+          "trigger_dag_id": "<only for TriggerDagRunOperator — safe_dag_id of the target DAG, MUST be explicit, not just in conversion_notes>",
+          "confidence_score": 0.95,
+          "conversion_notes": "<explain any non-obvious decisions>"
+        }
+      ],
+      "total_tasks": <integer — MUST equal number of tasks in array>,
+      "source_job_count": <integer — MUST equal number of jobs in input>,
+      "dependency_graph": {
+        "<task_id>": ["<upstream_task_id>"]
+      },
+      "execution_order": ["<task_id_1>", "<task_id_2>"],
+      "airflow_variables": {
+        "<VARIABLE_NAME>": {
+          "value": "__PLACEHOLDER__",
+          "description": "<what this variable is for>",
+          "source": "<job_id or 'infrastructure'>",
+          "original_value": "<original Control-M value if available>"
+        }
+      },
+      "job_to_task_mapping": {
+        "<JOBNAME>": "<task_id>"
+      },
+      "conversion_summary": {
+        "total_source_jobs": <integer>,
+        "total_target_tasks": <integer>,
+        "operator_breakdown": {"<operator>": <count>},
+        "script_mappings_resolved": <integer>,
+        "script_mappings_unresolved": <integer>,
+        "external_dependencies_count": <integer>,
+        "average_confidence": <float>
+      }
+    }
+    ```
+
+    CRITICAL RULES:
+    - total_tasks MUST equal the length of the tasks array
+    - source_job_count MUST equal the number of jobs in the input
+    - Every source job MUST have exactly one task (1:1 mapping — no merging, no skipping)
+    - task_id values must be lowercase with only letters, digits, underscores
+    - dag_id must be lowercase with only letters, digits, underscores
+    - dependency_graph must contain an entry for EVERY task_id
+    - execution_order must contain EVERY task_id in topological order
+    - "operator" field must use the canonical lowercase names from the schema above
+
+    COMPLETENESS VERIFICATION (check before outputting):
+    ✓ tasks array length == total_tasks == source_job_count
+    ✓ Every job_id from input appears in job_to_task_mapping
+    ✓ Every task_id in tasks appears in dependency_graph
+    ✓ No task_id appears more than once
+    ✓ All dependency task_ids in dependency_graph exist in the tasks array
+
+    Save the plan to: {output_file}
+    After saving, confirm: "Conversion plan saved to {output_file}"
+
+generate_dag_code:
+  description: "Generate MWAA DAG Python code from conversion plan (LLM fallback — must follow Jinja2 templates exactly)"
+  prompt: |
+    You are an expert Airflow DAG developer for Amazon MWAA.
+    The deterministic Jinja2 template renderer failed for this DAG. You are the fallback.
+    Your output MUST match the Jinja2 template patterns exactly — same structure, same patterns, same Variable.get() style.
+
+    ═══════════════════════════════════════════════════════════════
+    CONVERSION PLAN (source of truth for all task details):
+    ═══════════════════════════════════════════════════════════════
+    {conversion_plan}
+
+    ═══════════════════════════════════════════════════════════════
+    JINJA2 TEMPLATE REFERENCE (follow these patterns exactly)
+    ═══════════════════════════════════════════════════════════════
+
+    These are the exact templates the deterministic renderer uses.
+    Your output must match these patterns for every operator type.
+
+    --- dag_base.j2 (overall DAG structure) ---
+    """
+    Converted from Control-M folder: <chunk_id>
+    Generated by MWAA Converter
+    Source: control_m | Folder: <chunk_id>
+    Generated: <timestamp>
+    Job-to-Task Mapping (<N> jobs → <N> tasks):
+      <SOURCE_JOB>  →  <task_id>  (<operator>)
+    """
+    from datetime import datetime, timedelta
+    from airflow import DAG
+    from airflow.models import Variable
+    <operator imports — one per line>
+
+    default_args = {
+        "owner": "airflow",
+        "depends_on_past": False,
+        "email_on_failure": True,
+        "email_on_retry": False,
+        "retries": 1,
+        "retry_delay": timedelta(minutes=5),
+    }
+
+    with DAG(
+        dag_id="<dag_id>",
+        default_args=default_args,
+        description="Converted from Control-M folder: <chunk_id>",
+        schedule=<None or "cron_string">,
+        start_date=datetime(2024, 1, 1),
+        catchup=False,
+        max_active_runs=1,
+        tags=[<tags>],
+    ) as dag:
+        <task blocks>
+        # ── Dependencies ──────────────────────────────────────────────────────
+        <dep_1>
+        <dep_2>
+
+    --- emr_serverless_task.j2 ---
+        # ── Task: <task_id> ──────────────────────────────────────────────
+        # Source Job: <source_job_id> (<source_job_type>)
+        # Script: <source_script> → <target_script>
+        <task_id> = EmrServerlessStartJobOperator(
+            task_id="<task_id>",
+            application_id=Variable.get("EMR_APP_ID", default_var="__PLACEHOLDER__"),
+            execution_role_arn=Variable.get("EMR_EXEC_ROLE_ARN", default_var="__PLACEHOLDER__"),
+            job_driver={
+                "sparkSubmit": {
+                    "entryPoint": f"{Variable.get('SCRIPTS_BUCKET', default_var='__PLACEHOLDER__')}/<script_path>",
+                    "sparkSubmitParameters": "--conf spark.executor.cores=4 --conf spark.executor.memory=8g --conf spark.driver.cores=2 --conf spark.driver.memory=4g",
+                }
+            },
+            configuration_overrides={
+                "monitoringConfiguration": {
+                    "s3MonitoringConfiguration": {
+                        "logUri": f"{Variable.get('LOGS_BUCKET', default_var='__PLACEHOLDER__')}/<task_id>/",
+                    }
+                }
+            },
+        )
+
+    --- emr_add_steps_task.j2 (only when source job has AWS-EMR_CLUSTER_ID variable) ---
+        # ── Task: <task_id> ──────────────────────────────────────────────
+        # Source Job: <source_job_id> (EMR EC2 cluster step)
+        <task_id> = EmrAddStepsOperator(
+            task_id="<task_id>",
+            job_flow_id=Variable.get("EMR_CLUSTER_ID", default_var="__PLACEHOLDER__"),
+            steps=[
+                {
+                    "Name": "<task_id>",
+                    "ActionOnFailure": "CANCEL_AND_WAIT",
+                    "HadoopJarStep": {
+                        "Jar": "command-runner.jar",
+                        "Args": [
+                            "spark-submit",
+                            f"{Variable.get('SCRIPTS_BUCKET', default_var='__PLACEHOLDER__')}/<script_path>",
+                        ],
+                    },
+                }
+            ],
+            wait_for_completion=True,
+        )
+
+    --- bash_task.j2 ---
+        # ── Task: <task_id> ──────────────────────────────────────────────
+        # Source Job: <source_job_id> (<source_job_type>)
+        # Command: <bash_command>
+        <task_id> = BashOperator(
+            task_id="<task_id>",
+            bash_command="<bash_command>",
+        )
+
+    --- dummy_task.j2 ---
+        # ── Task: <task_id> ──────────────────────────────────────────────
+        # Source Job: <source_job_id> (<source_job_type> — sentinel/marker)
+        <task_id> = EmptyOperator(
+            task_id="<task_id>",
+        )
+
+    --- external_task_sensor.j2 (ONLY rendered automatically from external_dependencies — NEVER add manually) ---
+        # ── Sensor: wait_<ext_dag_id>_<ext_task_id> ─────────────────────────────────────────────
+        # Waits for: <external_dag_id>.<external_task_id>
+        wait_<ext_dag_id>_<ext_task_id> = ExternalTaskSensor(
+            task_id="wait_<ext_dag_id>_<ext_task_id>",
+            external_dag_id="<external_dag_id>",
+            external_task_id="<external_task_id>",
+            mode="reschedule",
+            timeout=3600,
+            poke_interval=60,
+            check_existence=True,
+        )
+
+    --- trigger_dag_run.j2 ---
+        # ── Task: <task_id> ──────────────────────────────────────────────
+        # Source Job: <source_job_id> (sub-flow → triggers child DAG)
+        # Triggers: <trigger_dag_id>
+        <task_id> = TriggerDagRunOperator(
+            task_id="<task_id>",
+            trigger_dag_id="<trigger_dag_id>",
+            wait_for_completion=True,
+            reset_dag_run=True,
+            poke_interval=60,
+        )
+
+    ═══════════════════════════════════════════════════════════════
+    OPERATOR IMPORT MAP (use exactly these import statements)
+    ═══════════════════════════════════════════════════════════════
+    emr_serverless  → from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
+    emr_add_steps   → from airflow.providers.amazon.aws.operators.emr import EmrAddStepsOperator
+    bash            → from airflow.operators.bash import BashOperator
+    dummy           → from airflow.operators.empty import EmptyOperator
+    trigger_dag_run → from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+    sensor          → from airflow.sensors.external_task import ExternalTaskSensor
+    Always include  → from airflow.models import Variable
+
+    ═══════════════════════════════════════════════════════════════
+    ABSOLUTE RULES — NEVER VIOLATE THESE
+    ═══════════════════════════════════════════════════════════════
+
+    1. NEVER assign Variable.get() to a module-level or DAG-scope variable.
+       WRONG:  EMR_APP_ID = Variable.get("EMR_APP_ID", ...)
+               task = EmrServerlessStartJobOperator(application_id=EMR_APP_ID, ...)
+       CORRECT: task = EmrServerlessStartJobOperator(application_id=Variable.get("EMR_APP_ID", default_var="__PLACEHOLDER__"), ...)
+
+    2. NEVER add ExternalTaskSensor as a named task in the tasks list.
+       External dependencies from external_dependencies[] are rendered as sensors automatically.
+       The sensor task_id is: wait_<external_dag_id>_<external_task_id>
+       Wire it: wait_<ext_dag_id>_<ext_task_id> >> <this_task_id>
+
+    3. NEVER hardcode s3:// URIs. Always use:
+       f"{Variable.get('SCRIPTS_BUCKET', default_var='__PLACEHOLDER__')}/<relative_path>"
+       f"{Variable.get('LOGS_BUCKET', default_var='__PLACEHOLDER__')}/<task_id>/"
+
+    4. EVERY Variable.get() call MUST have default_var='__PLACEHOLDER__'
+
+    5. total_tasks in plan == number of tasks you write. No extra tasks, no missing tasks.
+
+    6. Wire ALL dependencies from dependency_graph exactly as >> chains.
+       For each external_dependency on a task, add:
+         wait_<ext_dag_id>_<ext_task_id> >> <task_id>
+
+    7. Use schedule= (not schedule_interval=). Airflow 2.8+ syntax only.
+
+    8. dag_id must be exactly: {dag_id}
+
+    ═══════════════════════════════════════════════════════════════
+    OUTPUT
+    ═══════════════════════════════════════════════════════════════
+
+    Write the complete DAG Python file to: {output_file}
+    After writing, confirm: "DAG saved to {output_file}"
+
+create_mermaid_diagram:
+  description: "Create orchestration mermaid diagram from conversion plan"
+  prompt: |
+    You are an expert in creating visual workflow diagrams for AWS data pipelines.
+
+    Conversion Plan:
+    {conversion_plan}
+
+    Create a comprehensive mermaid flowchart showing:
+    1. Source Control-M jobs (left) with JOBNAME labels
+    2. Target MWAA tasks (right) with task_id labels and operator type
+    3. Conversion arrows showing the mapping
+    4. Task dependencies within the DAG
+    5. External dependencies (ExternalTaskSensor) shown with dashed arrows
+    6. Color coding by operator type:
+       - EMR Serverless: blue (#4A90D9)
+       - BashOperator: green (#5CB85C)
+       - EmptyOperator: gray (#9E9E9E)
+       - ExternalTaskSensor: orange (#F0AD4E)
+       - TriggerDagRunOperator: purple (#9B59B6)
+
+    Use proper mermaid flowchart TD syntax.
+    Node shapes: [] for source jobs, () for MWAA tasks, {} for sensors.
+
+    Save the diagram to the path specified.
+    Confirm: "Mermaid diagram saved to <path>"
+
+merge_reports:
+  description: "Merge conversion reports from all chunks"
+  prompt: |
+    You are an expert in data aggregation and AWS migration reporting.
+
+    Individual Chunk Reports:
+    {chunk_reports}
+
+    Create a consolidated ConversionReport:
+    1. Sum total jobs and tasks across all chunks
+    2. Verify source job count == target task count (1:1 mapping guarantee)
+    3. Merge all job-to-task mappings
+    4. Aggregate validation results
+    5. Calculate overall confidence score (weighted average)
+    6. List all generated DAG files
+
+    Return a JSON object with the merged report.
+    Save to the specified output file.
+    Confirm: "Final report saved to <path>"
+
+merge_variables:
+  description: "Merge Airflow variables from all chunks"
+  prompt: |
+    You are an expert in Amazon MWAA variable management.
+
+    Variables from all chunks:
+    {all_variables}
+
+    Merge variables following AWS best practices:
+    1. Deduplicate identical variables (same key, same value)
+    2. Flag conflicts (same key, different values) — keep both with conflict note
+    3. Organise by category: infrastructure (EMR, S3) vs job-specific
+    4. Ensure all values are "__PLACEHOLDER__" — customer fills in actual values
+    5. Add clear descriptions for each variable
+
+    Return a JSON object with merged variables and conflict report.
+    Save to the specified output file.
+    Confirm: "Variables saved to <path>"
+
+parse_airflow_dag:
+  description: "Parse on-prem Airflow DAG Python file into structured JobIR JSON for MWAA migration"
+  prompt: |
+    You are a senior AWS migration engineer specialising in migrating on-premises Apache Airflow DAGs to Amazon MWAA.
+    Your task is to parse an Airflow DAG Python file and produce a structured JobIR JSON that will be used to generate upgraded MWAA DAGs.
+
+    AIRFLOW DAG FILE CONTENT:
+    {dag_file_content}
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 1: WHAT TO EXTRACT
+    ═══════════════════════════════════════════════════════════════
+
+    From the DAG file, extract:
+
+    1. DAG METADATA:
+       - dag_id: from DAG('dag_id', ...) or dag_id= keyword argument
+       - schedule: from schedule= or schedule_interval= (keep as-is, e.g. "0 2 * * *")
+       - description: from description= argument
+       - owner: from default_args['owner']
+       - start_date: from default_args['start_date'] or start_date= argument
+
+    2. FOR EACH TASK (every Operator/Sensor instantiation):
+       - task_id: from task_id= argument
+       - operator_name: the class name (BashOperator, PythonOperator, DummyOperator, etc.)
+       - bash_command: for BashOperator — the bash_command= value
+       - python_callable: for PythonOperator — the callable name
+       - script extraction from bash_command:
+           "hive -f /path/file.hql" → script_path="/path/file.hql", script_type="hql"
+           "spark-submit /path/file.py" → script_path="/path/file.py", script_type="py"
+           "python3 /path/file.py" → script_path="/path/file.py", script_type="py"
+           "beeline -f /path/file.sql" → script_path="/path/file.sql", script_type="sql"
+           "bash /path/file.sh" → script_path="/path/file.sh", script_type="sh"
+
+    3. DEPENDENCIES:
+       - From >> operator chains: a >> b >> c means b depends on a, c depends on b
+       - From set_upstream() / set_downstream() calls
+       - From list syntax: [a, b] >> c means c depends on both a and b
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 2: OPERATOR CLASSIFICATION RULES
+    ═══════════════════════════════════════════════════════════════
+
+    Map each Airflow operator to a job_type:
+
+    | Airflow Operator | job_type | Notes |
+    |-----------------|----------|-------|
+    | DummyOperator / EmptyOperator | dummy | Sentinel/marker task |
+    | BashOperator with hive/spark/beeline command | script | Extract script path |
+    | BashOperator with shell command | command | Keep bash_command |
+    | PythonOperator | script | script_type="py" |
+    | EmrServerlessStartJobOperator | aws_lambda | Already EMR Serverless |
+    | EmrAddStepsOperator | aws_lambda | EMR EC2 steps |
+    | ExternalTaskSensor | dummy | Will become ExternalTaskSensor in output |
+    | TriggerDagRunOperator | sub_flow | Cross-DAG trigger |
+    | Any other operator | command | Generic fallback |
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 3: UPGRADE NOTES
+    ═══════════════════════════════════════════════════════════════
+
+    Note these Airflow 1.x → 2.x upgrade issues in metadata.upgrade_notes:
+    - DummyOperator → EmptyOperator (import path changed)
+    - schedule_interval= → schedule= (Airflow 2.4+)
+    - airflow.operators.dummy_operator → airflow.operators.empty
+    - airflow.contrib.* → airflow.providers.* (provider packages)
+    - provide_context=True → removed (context auto-injected in 2.x)
+    - Any hardcoded S3 paths → should use Variable.get()
+    - Any hardcoded credentials → CRITICAL security issue
+
+    ═══════════════════════════════════════════════════════════════
+    SECTION 4: REQUIRED OUTPUT FORMAT
+    ═══════════════════════════════════════════════════════════════
+
+    You MUST produce ONE JSON object for the entire DAG with this EXACT schema:
+
+    ```json
+    {
+      "folder": "<dag_id>",
+      "dag_id": "<dag_id>",
+      "schedule": "<cron string or null>",
+      "source_type": "airflow",
+      "application": "<owner from default_args>",
+      "sub_application": "<description or empty string>",
+      "jobs": [
+        {
+          "job_id": "<task_id>",
+          "job_name": "<task_id>",
+          "job_type": "<command|script|dummy|aws_lambda|sub_flow>",
+          "description": "<operator class name>",
+          "command": "<bash_command value or null>",
+          "script_path": "<extracted script path or null>",
+          "script_type": "<hql|sql|py|sh|ksh|null>",
+          "folder": "<dag_id>",
+          "application": "",
+          "sub_application": "",
+          "run_as": "",
+          "dependencies": ["<upstream_task_id_1>"],
+          "variables": {},
+          "metadata": {
+            "task_type": "<original Airflow operator class name>",
+            "appl_type": "airflow",
+            "node_id": "",
+            "original_operator": "<full operator class name>",
+            "upgrade_notes": ["<list of upgrade issues found>"]
+          }
+        }
+      ]
+    }
+    ```
+
+    CRITICAL RULES:
+    - Every task in the DAG MUST appear in the output — no tasks may be skipped
+    - "dependencies" must only contain task_ids of upstream tasks (from >> chains)
+    - "job_type" must be one of: command, script, dummy, aws_lambda, sub_flow
+    - "script_type" must be one of: hql, sql, py, sh, ksh, or null
+    - "dependencies" must be a JSON array (even if empty: [])
+    - "variables" must be a JSON object (even if empty: {})
+    - "metadata" must include task_type, appl_type, node_id, original_operator, upgrade_notes
+
+    COMPLETENESS CHECK:
+    Before outputting, verify:
+    ✓ Number of jobs in output matches number of task definitions in the DAG
+    ✓ Every task has a non-empty job_id
+    ✓ All >> dependency chains are captured
+    ✓ upgrade_notes lists any Airflow 1.x patterns found

@@ -1,0 +1,7 @@
+# Runtime dependencies, pinned to exact versions (tested together; requires Python >= 3.10).
+fastmcp==4.1.4
+pydantic==2.14.2
+PyYAML==6.0.3
+Jinja2==3.1.6
+click==8.5.0
+defusedxml==0.7.1   # safe XML parsing for Control-M exports (blocks XXE / entity expansion)

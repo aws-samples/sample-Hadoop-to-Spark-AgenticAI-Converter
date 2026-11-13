@@ -1,0 +1,428 @@
+# =============================================================================
+# Impala to Spark SQL Converter — Prompt Library
+# Covers: identification, conversion, validation, error correction, chunking,
+#         merging, mermaid generation, and Finch testing
+# =============================================================================
+
+impala_identification:
+  template: |
+    Analyze the Impala SQL file at: {file_path}
+
+    OBJECTIVE: Identify Impala-specific constructs and assess conversion complexity.
+
+    STEP 1 — READ THE ENTIRE FILE:
+    Read the complete file and identify:
+    - Total lines
+    - Number of SELECT, INSERT, CREATE TABLE statements
+    - CTEs (WITH clauses)
+    - UNION ALL operations
+    - Window functions
+    - UDFs / UDAFs
+
+    STEP 2 — IDENTIFY IMPALA-SPECIFIC CONSTRUCTS:
+    Check for the following Impala-only patterns:
+
+    a) METADATA COMMANDS:
+       - INVALIDATE METADATA
+       - REFRESH <table>
+       - COMPUTE STATS / COMPUTE INCREMENTAL STATS
+
+    b) PERFORMANCE HINTS:
+       - /* +BROADCAST(alias) */
+       - /* +SHUFFLE(alias) */
+       - STRAIGHT_JOIN
+       - TABLESAMPLE SYSTEM(N)
+       - SET RUNTIME_FILTER_MODE=...
+       - SET RUNTIME_BLOOM_FILTER_SIZE=...
+
+    c) KUDU-SPECIFIC DML:
+       - UPSERT INTO
+       - UPDATE ... SET ... WHERE
+       - DELETE FROM ... WHERE
+       - STORED AS KUDU
+       - PRIMARY KEY (...)
+       - PARTITION BY HASH / PARTITION BY RANGE
+
+    d) IMPALA-SPECIFIC FUNCTIONS:
+       - NDV(column) — approximate count distinct
+       - APPX_MEDIAN(column) — approximate median
+       - DS_HLL(column) / DS_HLL_ESTIMATE() / DS_HLL_UNION()
+       - fnv_hash(...)
+       - TRUNC(timestamp, 'granularity')
+       - NVL(a, b) — null replacement
+       - NOW() without parentheses differences
+
+    e) DDL CONSTRUCTS:
+       - SORT BY (columns)
+       - PARTITION BY HASH (col) PARTITIONS N
+       - PARTITION BY RANGE (col) (PARTITION ... <= VALUES < ...)
+       - TBLPROPERTIES for Kudu
+       - ALTER TABLE ... ADD RANGE PARTITION
+
+    f) UDF/UDAF DECLARATIONS:
+       - CREATE FUNCTION ... LOCATION ... SYMBOL=...
+       - CREATE AGGREGATE FUNCTION ... INIT_FN/UPDATE_FN/MERGE_FN/FINALIZE_FN...
+
+    STEP 3 — ASSESS COMPLEXITY:
+    - LOW: Simple SELECT/JOIN/WHERE, minimal Impala-specific constructs
+    - MEDIUM: Window functions, LATERAL VIEW, INSERT OVERWRITE, COMPUTE STATS
+    - HIGH: Kudu DML (UPSERT/UPDATE/DELETE), UDFs/UDAFs, DS_HLL sketches, SCD patterns
+
+    STEP 4 — OUTPUT ANALYSIS:
+    Produce a structured analysis report showing:
+    - File statistics (lines, statements, complexity)
+    - Impala-specific constructs found (with line numbers)
+    - Conversion strategy recommendation
+    - Estimated conversion difficulty
+
+impala_spark_sql_generation:
+  template: |
+    Convert Impala SQL to Spark SQL: {impala_file}
+
+    OBJECTIVE: Generate Spark-compatible SQL with ZERO LOSS of business logic
+    and CORRECT syntax. Handle all Impala-specific constructs properly.
+
+    ⚠️ CRITICAL CONVERSION RULES FOR IMPALA → SPARK SQL:
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 1: METADATA COMMANDS — REMOVE (Spark handles metadata automatically)
+    ═══════════════════════════════════════════════════════════════════════════
+    - INVALIDATE METADATA <table>  →  REMOVE (comment out with explanation)
+    - REFRESH <table>              →  REMOVE (comment out with explanation)
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 2: COMPUTE STATS — CONVERT TO ANALYZE TABLE
+    ═══════════════════════════════════════════════════════════════════════════
+    - COMPUTE STATS <table>
+      → ANALYZE TABLE <table> COMPUTE STATISTICS FOR ALL COLUMNS;
+    - COMPUTE INCREMENTAL STATS <table> PARTITION (col='val')
+      → ANALYZE TABLE <table> PARTITION (col='val') COMPUTE STATISTICS FOR ALL COLUMNS;
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 3: PERFORMANCE HINTS — REPOSITION OR REMOVE
+    ═══════════════════════════════════════════════════════════════════════════
+    - JOIN /* +BROADCAST(alias) */ <table> AS alias
+      → /*+ BROADCAST(alias) */ placed after SELECT keyword:
+        SELECT /*+ BROADCAST(alias) */ ... FROM ... JOIN <table> AS alias ...
+    - STRAIGHT_JOIN → REMOVE (no Spark equivalent; comment out)
+    - SET RUNTIME_FILTER_MODE=...    → REMOVE (Spark DPP is automatic)
+    - SET RUNTIME_BLOOM_FILTER_SIZE=... → REMOVE (Spark handles automatically)
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 4: TABLESAMPLE — CONVERT SYNTAX
+    ═══════════════════════════════════════════════════════════════════════════
+    - <table> TABLESAMPLE SYSTEM(N) AS alias
+      → <table> TABLESAMPLE (N PERCENT) AS alias
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 5: IMPALA-SPECIFIC FUNCTIONS — MAP TO SPARK EQUIVALENTS
+    ═══════════════════════════════════════════════════════════════════════════
+    - NDV(column)              → approx_count_distinct(column)
+    - APPX_MEDIAN(column)     → percentile_approx(column, 0.5)
+    - NVL(a, b)               → COALESCE(a, b)
+    - NOW()                   → current_timestamp()
+    - TRUNC(ts, 'YYYY')       → date_trunc('year', ts)
+    - TRUNC(ts, 'Q')          → date_trunc('quarter', ts)
+    - TRUNC(ts, 'MM')         → date_trunc('month', ts)
+    - TRUNC(ts, 'DD')         → date_trunc('day', ts)
+    - TRUNC(ts, 'HH')         → date_trunc('hour', ts)
+    - TRUNC(ts, 'MI')         → date_trunc('minute', ts)
+    - TRUNC(ts, 'DDD')        → date_trunc('day', ts)
+    - fnv_hash(expr)          → hash(expr)
+    - DS_HLL(col)             → -- Comment: No direct equivalent; use approx_count_distinct()
+    - DS_HLL_ESTIMATE(sketch) → -- Comment: Replace with approx_count_distinct()
+    - DS_HLL_UNION(sketch)    → -- Comment: Replace with approx_count_distinct()
+    - UNIX_TIMESTAMP()        → unix_timestamp()  (same in Spark)
+    - FROM_UNIXTIME(ts, fmt)  → from_unixtime(ts, fmt)  (same in Spark)
+    - DATE_FORMAT(ts, fmt)    → date_format(ts, fmt)  (same in Spark)
+    - DATEDIFF(end, start)    → datediff(end, start)  (same in Spark)
+    - ADD_MONTHS(dt, n)       → add_months(dt, n)  (same in Spark)
+    - MONTHS_BETWEEN(a, b)    → months_between(a, b)  (same in Spark)
+    - DATE_ADD(dt, n)         → date_add(dt, n)  (same in Spark)
+    - PERCENTILE(col, p)      → percentile_approx(col, p)
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 6: KUDU DML — CONVERT TO DELTA LAKE / STANDARD SPARK SQL
+    ═══════════════════════════════════════════════════════════════════════════
+    - UPSERT INTO <table> SELECT ...
+      → MERGE INTO <table> AS t USING (<select>) AS s
+        ON t.<pk_cols> = s.<pk_cols>
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *;
+
+    - UPDATE <table> SET col=val WHERE condition
+      → UPDATE <table> SET col=val WHERE condition  (same syntax in Delta Lake)
+
+    - DELETE FROM <table> WHERE condition
+      → DELETE FROM <table> WHERE condition  (same syntax in Delta Lake)
+
+    - If the query has no Delta Lake context, convert UPSERT/UPDATE/DELETE
+      to comments explaining the Spark equivalent approach
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 7: KUDU DDL — CONVERT TO DELTA/PARQUET
+    ═══════════════════════════════════════════════════════════════════════════
+    - STORED AS KUDU → USING DELTA (or STORED AS PARQUET with comment)
+    - PRIMARY KEY (...) → -- Comment: Primary key enforcement via Delta constraints
+    - PARTITION BY HASH (col) PARTITIONS N → -- Remove (Delta handles internally)
+    - PARTITION BY RANGE (col) (...) → PARTITIONED BY (col)
+    - ALTER TABLE ... ADD RANGE PARTITION → -- Comment: Not needed in Delta
+    - 'kudu.table_name' = '...' → Remove from TBLPROPERTIES
+    - 'kudu.num_tablet_replicas' = '...' → Remove from TBLPROPERTIES
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 8: UDF/UDAF DECLARATIONS — CONVERT SYNTAX
+    ═══════════════════════════════════════════════════════════════════════════
+    - CREATE FUNCTION <name>(<args>) RETURNS <type> LOCATION '...' SYMBOL='...'
+      → CREATE OR REPLACE TEMPORARY FUNCTION <name>
+        AS '<symbol_class>'
+        USING JAR '<location_path>';
+
+    - CREATE AGGREGATE FUNCTION ... INIT_FN/UPDATE_FN/MERGE_FN/FINALIZE_FN...
+      → -- Comment: Spark UDAFs must be registered via spark.udf.register()
+        -- CREATE OR REPLACE TEMPORARY FUNCTION <name>
+        --   AS '<class_name>'
+        --   USING JAR '<jar_path>';
+        -- Note: Impala UDAF pattern not directly portable; requires Spark UDAF implementation
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 9: SORT BY — REMOVE OR COMMENT
+    ═══════════════════════════════════════════════════════════════════════════
+    - CREATE TABLE ... SORT BY (cols) → Remove SORT BY clause
+      -- Comment: Use Delta OPTIMIZE ... ZORDER BY (cols) instead
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 10: KEEP AS-IS (Spark supports these identically)
+    ═══════════════════════════════════════════════════════════════════════════
+    - IF(condition, true, false)
+    - CASE WHEN ... THEN ... END
+    - WITH clauses (CTEs)
+    - Window functions (ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, SUM OVER, etc.)
+    - INSERT OVERWRITE / INSERT INTO
+    - PARTITION (col=val) in INSERT
+    - LATERAL VIEW EXPLODE / LATERAL VIEW OUTER EXPLODE
+    - STORED AS PARQUET (keep as-is)
+    - All standard SQL functions (CONCAT, CONCAT_WS, SPLIT, SUBSTR, etc.)
+    - ${VARIABLE} substitutions
+    - REGEXP_EXTRACT, REGEXP_REPLACE
+    - COALESCE, NULLIF
+    - CAST expressions
+    - All standard JOINs
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 11: HIVE-LIKE SETTINGS — REMOVE
+    ═══════════════════════════════════════════════════════════════════════════
+    - SET <impala_specific_setting>=<value>  → Remove (unless it's a Spark SET)
+    - USE <database>;  → Remove
+
+    ═══════════════════════════════════════════════════════════════════════════
+    RULE 12: LOCATION AND TBLPROPERTIES — PRESERVE (adjustable by user)
+    ═══════════════════════════════════════════════════════════════════════════
+    - LOCATION 's3://...' → Keep as-is
+    - TBLPROPERTIES ('parquet.compression' = 'SNAPPY') → Keep as-is
+
+    ═══════════════════════════════════════════════════════════════════════════
+    CONVERSION PROCESS:
+    ═══════════════════════════════════════════════════════════════════════════
+
+    1. READ the complete Impala SQL file
+    2. APPLY rules above systematically
+    3. PRESERVE all business logic, column order, JOINs, WHERE clauses
+    4. ADD comments for removed/converted constructs explaining the change
+    5. VERIFY completeness — every statement must be accounted for
+    6. SAVE to: output/impala/spark_sql/{filename}.sql
+
+    OUTPUT HEADER (add at top of converted file):
+    ```
+    -- =============================================================================
+    -- Converted from Impala SQL to Spark SQL
+    -- Source: {impala_file}
+    -- Conversion Date: <current_date>
+    -- Converter: Impala-to-SparkSQL Framework
+    -- =============================================================================
+    ```
+
+    QUALITY CHECKLIST:
+    ✓ All source tables referenced
+    ✓ All CTEs preserved
+    ✓ All columns in exact order
+    ✓ All JOINs preserved
+    ✓ All WHERE conditions preserved
+    ✓ All business logic maintained
+    ✓ Impala-specific constructs properly converted
+    ✓ Comments added for removed/converted items
+    ✓ Syntax is valid Spark SQL
+
+    Execute comprehensive conversion now.
+
+impala_validation:
+  template: |
+    Validate the Spark SQL file converted from Impala: {sql_file}
+    Compare with source Impala file: {source_impala_file}
+
+    OBJECTIVE: Validate that the conversion is complete and correct.
+
+    VALIDATION CHECKS:
+
+    1. **COMPLETENESS CHECK** (Compare with source):
+       - Count SELECT statements: Source vs Output (should match)
+       - Count INSERT statements: Source vs Output (should match)
+       - Count tables referenced: Source vs Output (should match)
+       - Count CTEs: Source vs Output (should match)
+       - Count UNION operations: Source vs Output (should match)
+
+    2. **IMPALA CONSTRUCT REMOVAL CHECK**:
+       Verify that Impala-specific constructs are properly handled:
+       - No remaining INVALIDATE METADATA (should be commented out)
+       - No remaining COMPUTE STATS (should be converted to ANALYZE TABLE)
+       - No remaining NDV() (should be approx_count_distinct())
+       - No remaining APPX_MEDIAN() (should be percentile_approx())
+       - No remaining STRAIGHT_JOIN
+       - No remaining /* +BROADCAST */ after JOIN (should be after SELECT)
+       - No remaining TABLESAMPLE SYSTEM() (should be TABLESAMPLE PERCENT)
+       - No remaining NVL() (should be COALESCE())
+       - No remaining STORED AS KUDU
+       - No remaining UPSERT INTO (should be MERGE INTO or commented)
+
+    3. **SYNTAX CHECK**:
+       - Valid SQL structure
+       - No broken statements
+       - Proper semicolons
+       - Balanced parentheses
+
+    4. **BUSINESS LOGIC PRESERVATION**:
+       - All columns preserved in order
+       - All JOIN conditions intact
+       - All WHERE filters intact
+       - All aggregations intact
+       - All window functions intact
+
+    REPORT FORMAT:
+    VALIDATION RESULT: [PASS or FAIL]
+
+    If PASS:
+    - All transformations present: YES
+    - Impala constructs converted: YES
+    - Syntax valid: YES
+
+    If FAIL:
+    - Missing transformations: [list]
+    - Unconverted Impala constructs: [list with line numbers]
+    - Syntax issues: [list]
+    - Recommendations: [how to fix]
+
+impala_error_correction:
+  template: |
+    Fix conversion errors in Impala-to-Spark converted file: {sql_file}
+
+    ERROR DETAILS:
+    {error_details}
+
+    OBJECTIVE: Correct errors while preserving ALL business logic (NO DATA LOSS)
+
+    CRITICAL RULES:
+    - NEVER delete or remove business logic lines
+    - ALWAYS comment out invalid lines instead of removing them
+    - ALWAYS add explanation comments for what was changed
+    - PRESERVE all original content for reference
+
+    IMPALA-SPECIFIC ERROR PATTERNS TO CHECK:
+    1. Unconverted NDV() → replace with approx_count_distinct()
+    2. Unconverted APPX_MEDIAN() → replace with percentile_approx(col, 0.5)
+    3. Unconverted NVL() → replace with COALESCE()
+    4. Unconverted TRUNC(ts, 'X') → replace with date_trunc('x', ts)
+    5. Remaining INVALIDATE METADATA → comment out
+    6. Remaining COMPUTE STATS → convert to ANALYZE TABLE
+    7. Misplaced BROADCAST hints → move to after SELECT
+    8. TABLESAMPLE SYSTEM(N) → TABLESAMPLE (N PERCENT)
+    9. STORED AS KUDU → USING DELTA or STORED AS PARQUET
+    10. NOW() without parentheses issues → current_timestamp()
+
+    For each fix:
+    - Keep original line as comment
+    - Add corrected line below
+    - Add explanation comment
+
+    Save corrected file to: {sql_file}
+
+impala_mermaid_generation:
+  template: |
+    Create a comprehensive mermaid diagram for Impala SQL file: {impala_file}
+
+    Follow the same process as HiveQL mermaid generation:
+    1. READ AND ANALYZE ENTIRE FILE
+    2. MAP DATA FLOW (sources → transformations → targets)
+    3. CREATE MERMAID FLOWCHART with proper node shapes
+    4. HIGHLIGHT Impala-specific operations:
+       - COMPUTE STATS nodes
+       - INVALIDATE METADATA nodes
+       - Kudu DML operations (UPSERT/UPDATE/DELETE)
+       - Performance hints (BROADCAST joins)
+       - TABLESAMPLE operations
+    5. VERIFY completeness
+    6. SAVE to: output/impala/mermaid/{filename}.md
+
+    Node shapes for Impala-specific operations:
+    - {{COMPUTE STATS}} — hexagon for maintenance operations
+    - (BROADCAST JOIN) — rounded for optimized joins
+    - [UPSERT/MERGE] — rectangular for DML
+    - [/Target Table/] — trapezoid for outputs
+
+impala_chunking:
+  template: |
+    Chunk the large Impala SQL file at: {file_path}
+
+    Follow the same chunking process as HiveQL:
+    1. ANALYZE FILE STRUCTURE
+    2. IDENTIFY NATURAL CHUNKING BOUNDARIES
+    3. DETERMINE CHUNK BOUNDARIES (5-6 chunks)
+    4. VALIDATE EACH CHUNK
+    5. CREATE CHUNKS with proper naming:
+       output/impala/chunks/{base_filename}/{base_filename}_chunk_001.sql
+    6. VERIFY CHUNKING COMPLETENESS (line counts match)
+
+    ADDITIONAL IMPALA-SPECIFIC BOUNDARIES:
+    ✅ SAFE: Between COMPUTE STATS statements
+    ✅ SAFE: Between INVALIDATE METADATA blocks
+    ✅ SAFE: Between independent DML operations (UPSERT/UPDATE/DELETE)
+    ❌ UNSAFE: Inside a Kudu UPSERT ... SELECT block
+    ❌ UNSAFE: Between CREATE TABLE and its first INSERT
+
+impala_merging:
+  template: |
+    Merge converted Spark SQL chunks from: {chunk_directory}
+
+    Follow the same merging process as HiveQL:
+    1. Read all chunk files
+    2. Analyze dependencies
+    3. Deduplicate shared resources (CTEs, UDF registrations)
+    4. Maintain correct execution order
+    5. Verify all chunks accounted for
+    6. Save to: output/impala/spark_sql/{base_name}_FINAL.sql
+
+    ADDITIONAL IMPALA-SPECIFIC MERGING RULES:
+    - Keep ANALYZE TABLE statements at the end (after all DML)
+    - Deduplicate UDF/UDAF registrations (keep only once at top)
+    - Maintain MERGE INTO ordering when multiple exist
+    - Keep Delta Lake table creation before MERGE operations
+
+impala_finch_testing:
+  template: |
+    Test the Impala-to-Spark converted SQL in Finch container: {sql_file}
+
+    ⚠️ CRITICAL RULES:
+    - DO NOT create separate test files
+    - ONLY create ONE final report: output/impala/validation/{file_name}_test_report.md
+
+    STEPS:
+    1. Ensure Finch container is running (finch ps)
+    2. Generate 1-2 sample data rows inline
+    3. Execute SQL in Finch/Spark
+    4. Document everything in ONE report
+
+    IMPALA-SPECIFIC TEST CONSIDERATIONS:
+    - approx_count_distinct() results are approximate — allow tolerance
+    - percentile_approx() results are approximate — allow tolerance
+    - MERGE INTO requires Delta Lake tables — test with Delta format
+    - date_trunc() returns TIMESTAMP in Spark — verify format
+    - TABLESAMPLE results are non-deterministic — verify execution success only

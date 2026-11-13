@@ -1,0 +1,166 @@
+# Agent Registry — capability discovery for the Orchestrator
+# The Orchestrator reads this to know which agent handles what.
+
+agents:
+  code_converter:
+    mcp_server: hive-converter
+    description: "HiveQL to Spark SQL code conversion"
+    capabilities:
+      - hive_analysis
+      - spark_sql_conversion
+      - validation
+      - chunking
+      - merging
+      - error_correction
+    input_types: [".hql", ".txt"]
+    output_types: [".sql"]
+    tools:
+      - identify_hive_file
+      - generate_spark_sql
+      - chunk_hive_file
+      - create_detailed_mermaid
+      - validate_spark_sql
+      - fix_conversion_errors
+      - merge_spark_sql_chunks
+
+  hive_eval:
+    mcp_server: hive-eval
+    description: "Spark SQL execution and validation in Finch container"
+    capabilities:
+      - spark_execution
+    input_types: [".sql"]
+    output_types: []
+    depends_on: [code_converter]
+    tools:
+      - execute_spark_sql
+
+  workflow_converter:
+    mcp_server: mwaa-converter
+    description: "Control-M / Airflow to MWAA DAG conversion"
+    capabilities:
+      - control_m_parsing
+      - airflow_parsing
+      - dependency_analysis
+      - conversion_planning
+      - dag_generation
+      - mermaid_generation
+      - report_merging
+    input_types: [".json", ".xml", ".py"]
+    output_types: [".py", ".json", ".md"]
+    tools:
+      - parse_control_m_job
+      - parse_airflow_dag
+      - analyze_chunk
+      - generate_conversion_plan
+      - generate_dag_code
+      - create_orchestration_mermaid
+      - merge_conversion_reports
+      - merge_airflow_variables
+
+  workflow_validator:
+    mcp_server: mwaa-validator
+    description: "MWAA DAG validation (syntax, structure, security, DagBag)"
+    capabilities:
+      - syntax_validation
+      - structure_validation
+      - security_validation
+      - dagbag_validation
+      - error_correction
+    input_types: [".py"]
+    output_types: [".json"]
+    depends_on: [workflow_converter]
+    tools:
+      - validate_syntax
+      - validate_structure
+      - validate_security
+      - validate_dagbag
+      - fix_validation_errors
+
+  accuracy_calculator:
+    mcp_server: accuracy-calculator
+    description: "8-dimension accuracy analysis with HTML dashboard"
+    capabilities:
+      - accuracy_analysis
+      - html_reporting
+      - markdown_reporting
+    input_types: [".sql", ".hql"]
+    output_types: [".html", ".md", ".json"]
+    depends_on: [code_converter]
+    tools:
+      - analyze_accuracy
+      - generate_accuracy_report
+      - generate_dashboard
+
+  test_validator:
+    mcp_server: test-validator
+    description: "End-to-end test validation (planned)"
+    capabilities:
+      - data_validation
+      - regression_testing
+    input_types: [".sql", ".py"]
+    output_types: [".json"]
+    depends_on: [code_converter, workflow_converter]
+    disabled: true
+    tools: []
+
+  test_orchestrator:
+    mcp_server: test-orchestrator
+    description: "Hive vs Spark SQL equivalence testing — DDL extraction, data generation, dependency analysis, result comparison, MINUS validation, report generation"
+    capabilities:
+      - ddl_extraction
+      - test_data_generation
+      - dependency_analysis
+      - result_comparison
+      - minus_validation
+      - report_generation
+    input_types: [".hql", ".sql", ".txt"]
+    output_types: [".json", ".sql", ".csv", ".md", ".html"]
+    depends_on: [code_converter]
+    tools:
+      - extract_or_load_ddl
+      - generate_test_data
+      - analyze_dependencies
+      - compare_results
+      - run_minus_validation
+      - generate_test_report
+
+  test_execution:
+    mcp_server: test-execution
+    description: "Container lifecycle and SQL execution for Hive/Spark equivalence testing"
+    capabilities:
+      - container_management
+      - hive_execution
+      - spark_execution
+      - data_loading
+    input_types: [".sql", ".hql"]
+    output_types: [".txt"]
+    depends_on: [test_orchestrator]
+    tools:
+      - start_test_containers
+      - load_test_data_hive
+      - load_test_data_spark
+      - execute_hive_query
+      - execute_spark_query
+      - stop_test_containers
+
+  impala_converter:
+    mcp_server: impala-converter
+    description: "Impala SQL to Spark SQL code conversion — handles NDV, APPX_MEDIAN, COMPUTE STATS, Kudu DML, performance hints, TABLESAMPLE"
+    capabilities:
+      - impala_analysis
+      - spark_sql_conversion
+      - validation
+      - chunking
+      - merging
+      - error_correction
+      - mermaid_generation
+    input_types: [".sql"]
+    output_types: [".sql"]
+    tools:
+      - identify_impala_file
+      - generate_spark_sql_from_impala
+      - validate_impala_spark_sql
+      - fix_impala_conversion_errors
+      - create_impala_mermaid
+      - chunk_impala_file
+      - merge_impala_spark_chunks

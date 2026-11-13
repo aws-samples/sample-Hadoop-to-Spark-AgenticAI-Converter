@@ -1,0 +1,69 @@
+# MWAA Converter Configuration
+# Edit this file to customise behaviour without touching source code.
+
+# ── Airflow Variable Names ────────────────────────────────────────────────────
+# These are the Airflow Variable keys used in generated DAGs via Variable.get().
+# Change them here if your MWAA environment uses different naming conventions.
+# The same names will appear in output/mwaa/airflow_variables.json.
+airflow_variables:
+  emr_app_id:          "EMR_APP_ID"           # EMR Serverless Application ID
+  emr_exec_role_arn:   "EMR_EXEC_ROLE_ARN"    # EMR Serverless Execution Role ARN
+  scripts_bucket:      "SCRIPTS_BUCKET"        # S3 prefix for Spark SQL / Python scripts
+  logs_bucket:         "LOGS_BUCKET"           # S3 prefix for EMR job logs
+  emr_cluster_id:      "EMR_CLUSTER_ID"        # EMR EC2 cluster ID (EMR_ADD_STEPS only)
+
+# ── DAG Default Arguments ─────────────────────────────────────────────────────
+# Applied to every generated DAG's default_args dict.
+dag_defaults:
+  owner:               "airflow"
+  depends_on_past:     false
+  email_on_failure:    true
+  email_on_retry:      false
+  retries:             1
+  retry_delay_minutes: 5
+  max_active_runs:     1
+
+# ── EMR Serverless Spark Submit Parameters ────────────────────────────────────
+# Default Spark configuration applied to every EMR Serverless task.
+emr_serverless:
+  spark_submit_parameters: >-
+    --conf spark.executor.cores=4
+    --conf spark.executor.memory=8g
+    --conf spark.driver.cores=2
+    --conf spark.driver.memory=4g
+
+# ── Conversion Settings ───────────────────────────────────────────────────────
+conversion:
+  max_workers:              4     # Parallel processing workers
+  max_correction_attempts:  3     # Self-correction retries per stage
+
+# ── HiveQL Conversion (Stage 4.5) ────────────────────────────────────────────
+# When enabled, .hql scripts referenced in Control-M jobs are automatically
+# converted to Spark SQL before DAG generation. Disable if Spark SQL files
+# are already available and mapped in spark_sql_mapping.json.
+hive_conversion:
+  enabled:              false                   # --convert-hive flag overrides this
+  # Paths are relative to the project root (see project_paths.py).
+  hive_input_dir:     "input/mwaa/hive_scripts"   # Where customer places .hql files
+  hive_staging_dir:   "output/mwaa/hive_staging"  # .hql files are copied here for conversion
+  spark_sql_output_dir: "output/mwaa/spark_sql"       # Converted Spark SQL lands here
+  scripts_s3_prefix:    "s3://${MWAA_SCRIPTS_BUCKET}/spark_sql"  # S3 prefix for mapping
+
+# ── Chunking Strategy ─────────────────────────────────────────────────────────
+chunking:
+  strategy: organizational        # organizational = Smart Folder / TaskGroup boundaries only
+
+# ── Validation Settings ───────────────────────────────────────────────────────
+validation:
+  enabled:          true
+  dagbag_python:    "venv-airflow/bin/python"
+  # ^ Python executable that has Airflow installed. Points to the separate
+  # venv-airflow/ created by setup.sh (kept apart from the converter's venv so
+  # Airflow's pinned dependencies never conflict). If it does not exist, the
+  # DagBag check is reported as skipped. On Windows: venv-airflow/Scripts/python.exe
+
+# ── Output Settings ───────────────────────────────────────────────────────────
+output:
+  generate_mermaid:    true
+  generate_html_report: true
+  save_intermediate:   true       # Keep job_ir/, chunks/, plans/ for debugging

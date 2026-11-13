@@ -1,0 +1,617 @@
+generalized_file_chunking:
+  template: |
+    Chunk the large HiveQL file at: {file_path}
+    
+    OBJECTIVE: Create 5-6 logical chunks that preserve complete SQL transformations without breaking any logic
+    
+    ⚠️ CRITICAL RULES - READ FIRST:
+    - NEVER split in the middle of a transformation (CTE, UNION branch, INSERT statement)
+    - ALWAYS preserve complete logical units
+    - ALWAYS maintain proper SQL syntax in each chunk
+    - Each chunk must be independently understandable
+    
+    STEP-BY-STEP CHUNKING PROCESS:
+    
+    1. **ANALYZE FILE STRUCTURE** (DO THIS FIRST):
+       a. Count total lines in the file
+       b. Identify ALL major structural elements:
+          - Header section (comments, variables, UDF definitions)
+          - INSERT statements and their boundaries
+          - UNION ALL operations and their branches
+          - CTE (WITH clause) definitions and their usage
+          - Source table queries (FROM clauses)
+          - Subqueries and nested SELECTs
+       
+       c. Map dependencies:
+          - Which CTEs depend on other CTEs
+          - Which queries reference which tables
+          - Which transformations must stay together
+    
+    2. **IDENTIFY NATURAL CHUNKING BOUNDARIES**:
+       Look for these patterns as safe split points:
+       
+       ✅ SAFE BOUNDARIES (can split here):
+       - Between complete UNION ALL branches (after one branch ends, before next begins)
+       - After a complete source table query (after the WHERE clause and before next UNION)
+       - Between independent INSERT statements
+       - After complete CTE definitions (if not used in next section)
+       
+       ❌ UNSAFE BOUNDARIES (NEVER split here):
+       - Inside a SELECT statement (between SELECT and FROM)
+       - Inside a UNION ALL operation (between branches)
+       - Between CTE definition and its usage
+       - Inside a WHERE clause
+       - Inside a CASE statement
+       - Inside function calls or expressions
+       - Between INSERT and its SELECT
+    
+    3. **DETERMINE CHUNK BOUNDARIES** (5-6 chunks):
+       Based on file structure, calculate optimal split points:
+       
+       Example for a file with 9 UNION ALL branches:
+       - Chunk 1: Header + INSERT statement + first 1-2 source tables
+       - Chunk 2: Next 1-2 source tables
+       - Chunk 3: Next 2 source tables
+       - Chunk 4: Next 1-2 source tables
+       - Chunk 5: Next 2 source tables
+       - Chunk 6: Last 1-2 source tables + closing statements
+       
+       Aim for roughly equal sizes but PRIORITIZE logical completeness over size
+    
+    4. **VALIDATE EACH CHUNK** (BEFORE CREATING):
+       For each proposed chunk, verify:
+       - ✓ Starts at a safe boundary
+       - ✓ Ends at a safe boundary
+       - ✓ Contains complete transformations
+       - ✓ No broken SQL syntax
+       - ✓ All referenced elements are defined or will be in context
+    
+    5. **CREATE CHUNKS WITH PROPER NAMING**:
+       
+       a. Extract base filename (without extension):
+          Example: /path/to/customer_report.hql → base name is "customer_report"
+       
+       b. Create output directory structure:
+          output/hive/chunks/{{base_filename}}/
+          
+          Example: output/hive/chunks/customer_report/
+       
+       c. Save each chunk with sequential naming:
+          {{base_filename}}_chunk_001.hql
+          {{base_filename}}_chunk_002.hql
+          {{base_filename}}_chunk_003.hql
+          etc.
+          
+          Example:
+          - output/hive/chunks/customer_report/customer_report_chunk_001.hql
+          - output/hive/chunks/customer_report/customer_report_chunk_002.hql
+    
+    6. **EXECUTE CHUNKING** (USE EXACT LINE NUMBERS):
+       
+       Based on your analysis, use sed or similar tools to extract exact line ranges:
+       
+       ```bash
+       # Create output directory
+       mkdir -p output/hive/chunks/{{base_filename}}
+       
+       # Extract each chunk with precise line numbers
+       sed -n '{{start_line}},{{end_line}}p' {file_path} > output/hive/chunks/{{base_filename}}/{{base_filename}}_chunk_001.hql
+       sed -n '{{start_line}},{{end_line}}p' {file_path} > output/hive/chunks/{{base_filename}}/{{base_filename}}_chunk_002.hql
+       # ... continue for all chunks
+       ```
+       
+       CRITICAL: Use the EXACT line numbers you identified in step 3
+    
+    7. **VERIFY CHUNKING COMPLETENESS**:
+       After creating all chunks, verify:
+       
+       ```bash
+       # Count total lines in original file
+       wc -l {file_path}
+       
+       # Count total lines in all chunks
+       wc -l output/hive/chunks/{{base_filename}}/*.hql
+       
+       # Verify totals match
+       ```
+       
+       The sum of all chunk lines MUST equal the original file line count
+    
+    8. **DOCUMENT CHUNK STRUCTURE**:
+       Create a simple text file documenting the chunking:
+       
+       output/hive/chunks/{{base_filename}}/CHUNK_INFO.txt:
+       ```
+       Original file: {file_path}
+       Total lines: {{total_lines}}
+       Number of chunks: {{chunk_count}}
+       
+       Chunk 1 (lines {{start}}-{{end}}): Header + INSERT + Source tables 1-2
+       Chunk 2 (lines {{start}}-{{end}}): Source tables 3-4
+       Chunk 3 (lines {{start}}-{{end}}): Source tables 5-6
+       Chunk 4 (lines {{start}}-{{end}}): Source tables 7-8
+       Chunk 5 (lines {{start}}-{{end}}): Source table 9 + closing
+       ```
+    
+    CRITICAL SUCCESS CRITERIA:
+    - ✓ All chunks created successfully
+    - ✓ Total lines match original file
+    - ✓ Each chunk contains complete transformations
+    - ✓ No broken SQL syntax in any chunk
+    - ✓ Proper naming convention followed
+    - ✓ Output directory structure correct
+    
+    Now analyze the file at {file_path} and create the chunks following this process exactly.
+
+mermaid_generation:
+  template: |
+    Create a comprehensive mermaid diagram for HiveQL file: {hive_file}
+    
+    OBJECTIVE: Create ACCURATE and COMPLETE data flow visualization with NO LOSS of information
+    
+    CRITICAL REQUIREMENTS:
+    - EVERY transformation must be represented
+    - EVERY table must be shown
+    - EVERY data flow must be captured
+    - Diagram must be ACCURATE and match the actual SQL logic
+    
+    STEP-BY-STEP PROCESS:
+    
+    1. **READ AND ANALYZE ENTIRE FILE**:
+       - Read the complete HiveQL file from start to end
+       - Identify ALL components:
+         * Source tables (FROM clauses)
+         * CTEs (WITH clauses) and their dependencies
+         * Transformations (JOINs, aggregations, filters, CASE statements)
+         * UDFs and their logic
+         * UNION operations
+         * Subqueries
+         * Target tables (INSERT statements)
+         * Data flow between components
+    
+    2. **MAP DATA FLOW**:
+       - Trace data flow from sources to targets
+       - Identify transformation sequence
+       - Map dependencies between CTEs
+       - Show how data flows through UNION operations
+       - Capture all JOIN relationships
+    
+    3. **CREATE MERMAID FLOWCHART**:
+       Use proper node shapes and connections:
+       
+       ```mermaid
+       flowchart TD
+           Source1[Source Table 1]
+           Source2[Source Table 2]
+           
+           CTE1(CTE: transformation_name)
+           CTE2(CTE: another_transformation)
+           
+           Join1(JOIN: join_condition)
+           Filter1(FILTER: where_condition)
+           Agg1(AGGREGATE: group_by_columns)
+           
+           Union1(UNION ALL)
+           
+           Target[/Target Table/]
+           
+           Source1 --> CTE1
+           Source2 --> CTE2
+           CTE1 --> Join1
+           CTE2 --> Join1
+           Join1 --> Filter1
+           Filter1 --> Agg1
+           Agg1 --> Union1
+           Union1 --> Target
+       ```
+       
+       Node shapes:
+       - [Source Table] - rectangular for source tables
+       - (Transformation) - rounded for operations
+       - {Decision} - diamond for conditionals
+       - [/Target Table/] - trapezoid for outputs
+    
+    4. **CRITICAL SYNTAX RULES**:
+       - NO square brackets [] in node labels (only for shape definition)
+       - NO quotes inside labels
+       - NO special regex patterns
+       - Use <br/> for line breaks in labels
+       - Use plain text descriptions only
+       - Keep labels concise but descriptive
+    
+    5. **VERIFICATION**:
+       - Verify ALL tables are included
+       - Verify ALL transformations are shown
+       - Verify data flow is accurate
+       - Verify no components are missing
+    
+    6. **SAVE OUTPUT**:
+       Determine correct output path:
+       - If chunk file (contains _chunk_): output/hive/mermaid/{base_name}/{chunk_name}.md
+       - If regular file: output/hive/mermaid/{file_name}.md
+       
+       Save the complete mermaid diagram to the correct path.
+    
+    QUALITY CHECKLIST:
+    ✓ All source tables represented
+    ✓ All CTEs shown with dependencies
+    ✓ All transformations captured
+    ✓ All JOINs and their conditions shown
+    ✓ All UNION operations represented
+    ✓ All target tables shown
+    ✓ Data flow is accurate and complete
+    ✓ No information loss
+    ✓ Syntax is correct
+    
+    Execute comprehensive mermaid generation now.
+
+spark_sql_generation:
+  template: |
+    Convert HiveQL to Spark SQL: {hive_file}
+    
+    OBJECTIVE: Generate Spark-compatible SQL with ZERO LOSS of transformations and CORRECT syntax
+    
+    CRITICAL REQUIREMENTS:
+    - EVERY line of HiveQL must be converted or preserved
+    - EVERY transformation must be included
+    - EVERY column must be preserved in same order
+    - NO skipping of any logic
+    - Syntax must be 100% valid Spark SQL
+    
+    COMPREHENSIVE CONVERSION PROCESS:
+    
+    1. **READ ENTIRE FILE**:
+       - Read the complete HiveQL file from start to end
+       - DO NOT skip any lines
+       - Process every statement
+    
+    2. **PRESERVE STRUCTURE (NO LOSS)**:
+       - Keep ALL columns in EXACT same order
+       - Keep ALL IF statements as-is (Spark supports IF)
+       - Keep ALL CASE statements with all WHEN clauses
+       - Keep ALL UDFs with their jar/function definitions
+       - Keep ALL WITH clauses (CTEs) - Spark supports them
+       - Keep ALL subqueries
+       - Keep ALL UNION operations
+       - Keep ALL JOIN conditions
+       - Keep ALL WHERE clauses
+       - Keep ALL GROUP BY clauses
+       - Keep ALL ORDER BY clauses
+       - Keep ALL PARTITION BY clauses
+       - Keep ALL window functions
+       - Keep ALL aggregations
+    
+    3. **VARIABLE DECLARATIONS**:
+       Convert Hive variable syntax to Spark:
+       - VARIABLE_NAME=value → SET VAR VARIABLE_NAME = value;
+       - set hivevar:var=val → SET VAR var = val;
+       - Keep variable references: ${{VAR}} unchanged
+    
+    4. **REMOVE HIVE-SPECIFIC SETTINGS** (but keep SQL logic):
+       Remove these configuration lines ONLY:
+       - set hive.*
+       - set mapreduce.*
+       - use database;
+       
+       DO NOT remove any SQL logic or transformations
+    
+    5. **MINIMAL SYNTAX CONVERSIONS** (preserve logic):
+       - == → = (equality operator)
+       - current_date → current_date() (add parentheses)
+       - current_timestamp → current_timestamp() (add parentheses)
+       - nvl(a, b) → coalesce(a, b) (Spark equivalent)
+    
+    6. **KEEP AS-IS** (Spark supports these):
+       - IF statements: IF(condition, true_value, false_value)
+       - CASE statements: CASE WHEN ... THEN ... END
+       - Custom UDFs (with proper registration)
+       - WITH clauses (CTEs)
+       - INSERT statements (INSERT INTO/OVERWRITE)
+       - PARTITION clauses
+       - Date functions: datediff, from_unixtime, to_date, date_add, etc.
+       - String functions: LPAD, RPAD, regexp_replace, concat, substr, etc.
+       - Aggregate functions: SUM, COUNT, AVG, MAX, MIN, etc.
+       - Window functions: ROW_NUMBER, RANK, DENSE_RANK, LAG, LEAD, etc.
+       - Array functions: array, explode, etc.
+       - All other standard SQL functions
+    
+    7. **VERIFY COMPLETENESS**:
+       Before saving, verify:
+       ✓ All source tables are referenced
+       ✓ All CTEs are included
+       ✓ All columns are present
+       ✓ All transformations are converted
+       ✓ All JOINs are preserved
+       ✓ All WHERE conditions are included
+       ✓ All aggregations are present
+       ✓ All UNION operations are included
+       ✓ Target tables are correct
+       ✓ No lines were skipped
+       ✓ Syntax is valid Spark SQL
+    
+    8. **SAVE OUTPUT**:
+       Determine correct output path:
+       - If chunk file (contains _chunk_): output/hive/spark_sql/{base_name}/{chunk_name}.sql
+       - If regular file: output/hive/spark_sql/{file_name}.sql
+       
+       Save the complete converted SQL to the correct path.
+    
+    9. **QUALITY CHECKLIST**:
+       ✓ Zero loss of transformations
+       ✓ All columns preserved in order
+       ✓ All logic converted correctly
+       ✓ Syntax is 100% valid Spark SQL
+       ✓ No skipped lines
+       ✓ No incomplete statements
+       ✓ File is complete and executable
+    
+    CRITICAL: If you encounter ANY line you're unsure about, PRESERVE it as a comment with explanation rather than skipping it.
+    
+    Example:
+    -- TODO: Verify this Hive-specific function has Spark equivalent
+    -- Original: some_hive_function(column)
+    some_hive_function(column)
+    
+    Execute comprehensive conversion now with ZERO LOSS guarantee.
+
+validation:
+  template: |
+    Validate Spark SQL file: {sql_file}
+    Compare with source HiveQL file: {source_hive_file}
+    
+    OBJECTIVE: Simple validation ensuring NO LOSS and CORRECT SYNTAX
+    
+    VALIDATION CHECKS:
+    
+    1. **COMPLETENESS CHECK** (Compare with source):
+       
+       Read both files and verify:
+       - Count SELECT statements: Source vs Output (should match)
+       - Count INSERT statements: Source vs Output (should match)
+       - Count tables referenced: Source vs Output (should match)
+       - Count CTEs (WITH clauses): Source vs Output (should match)
+       - Count UNION operations: Source vs Output (should match)
+       
+       If counts don't match → FAIL (something was skipped)
+    
+    2. **SYNTAX CHECK** (Basic):
+       
+       Check if file has:
+       - Valid SQL keywords (SELECT, FROM, WHERE, etc.)
+       - Proper statement structure
+       - No obvious syntax errors
+       - No garbage text (lines that are clearly not SQL)
+    
+    3. **IDENTIFY PATTERNS OF INVALID CONTENT**:
+       Look for common patterns that indicate invalid content:
+       - Lines that don't start with SQL keywords or comments
+       - Lines with unusual characters or formatting
+       - Lines that look like debug output or metadata
+       - Lines that would not execute in Spark SQL
+    
+    4. **REPORT FORMAT**:
+       
+       VALIDATION RESULT: [PASS or FAIL]
+       
+       If PASS:
+       - All transformations present: YES
+       - Syntax valid: YES
+       
+       If FAIL:
+       - Missing transformations: [list what's missing]
+       - Syntax issues: [list issues]
+       - Recommendations: [how to fix]
+    
+    PASS CRITERIA (Simple):
+    ✓ Statement counts match between source and output
+    ✓ No obvious syntax errors
+    ✓ No garbage text
+    ✓ File looks like valid Spark SQL
+    
+    Execute simple validation now.
+
+error_correction:
+  template: |
+    Fix conversion errors in: {sql_file}
+    
+    ERROR DETAILS:
+    {error_details}
+    
+    OBJECTIVE: Correct all errors while preserving ALL content (NO DATA LOSS)
+    
+    CRITICAL RULES:
+    - NEVER delete or remove any lines
+    - ALWAYS comment out invalid lines instead of removing them
+    - ALWAYS add explanation comments for what was changed
+    - PRESERVE all original content for reference
+    
+    ERROR CORRECTION PROCESS:
+    
+    1. **READ THE FILE**:
+       - Read the complete SQL file
+       - Identify all lines mentioned in ERROR DETAILS
+    
+    2. **FOR INVALID LINES (non-SQL content)**:
+       - COMMENT OUT the line (don't remove)
+       - Add explanation comment above it
+       
+       Example:
+       BEFORE:
+       ---- RESULTS_c0368----
+       
+       AFTER:
+       -- COMMENTED OUT: Invalid content - not valid Spark SQL syntax
+       -- ---- RESULTS_c0368----
+    
+    3. **FOR SYNTAX ERRORS**:
+       - Keep the original line as comment
+       - Add corrected line below
+       - Add explanation comment
+       
+       Example:
+       BEFORE:
+       SELECT * FROM table WHERE id == 5;
+       
+       AFTER:
+       -- FIXED: Changed == to = for Spark SQL compatibility
+       -- Original: SELECT * FROM table WHERE id == 5;
+       SELECT * FROM table WHERE id = 5;
+    
+    4. **FOR INCOMPLETE STATEMENTS**:
+       - Keep the incomplete line as comment
+       - Add completed statement below
+       - Add explanation comment
+       
+       Example:
+       BEFORE:
+       SELECT * FROM
+       
+       AFTER:
+       -- FIXED: Completed incomplete SELECT statement
+       -- Original incomplete: SELECT * FROM
+       -- TODO: Verify table name is correct
+       SELECT * FROM table_name;
+    
+    5. **FOR MALFORMED CONTENT**:
+       - Comment out the malformed content
+       - Add corrected version if possible
+       - Add explanation comment
+    
+    6. **GENERAL PRINCIPLES**:
+       - Every change must have an explanation comment
+       - Original content must be preserved as comments
+       - Use clear, descriptive comments
+       - Format: -- COMMENTED OUT: [reason]
+       - Format: -- FIXED: [what was fixed]
+       - Format: -- TODO: [if manual review needed]
+    
+    7. **SAVE THE FILE**:
+       - Save corrected version to: {sql_file}
+       - Overwrite the original file with fixed version
+       - Ensure all changes are saved
+    
+    8. **VERIFICATION**:
+       - Verify file is valid Spark SQL after fixes
+       - Verify all invalid content is commented out
+       - Verify no data loss occurred
+    
+    REPORT FORMAT:
+    ERROR CORRECTION COMPLETE
+    
+    Changes made:
+    - Line X: [description of fix]
+    - Line Y: [description of fix]
+    
+    Summary:
+    - Total lines commented out: [count]
+    - Total syntax errors fixed: [count]
+    - All original content preserved: YES
+    
+    Execute error correction now.
+
+smart_merging:
+  template: |
+    Merge Spark SQL chunks from: {chunk_directory}
+    
+    OBJECTIVE: Create single coherent SQL file with zero loss
+    
+    STEPS:
+    1. Read all chunk files
+    2. Analyze dependencies between chunks
+    3. Identify shared resources (CTEs, UDFs, variables)
+    4. Deduplicate shared resources (keep only once at top)
+    5. Preserve ALL unique transformations
+    6. Maintain correct execution order
+    7. Verify: all chunks accounted for
+    8. Save to: output/hive/spark_sql/{{base_name}}_FINAL.sql
+    
+    CRITICAL: Include MERGE VERIFICATION report showing:
+    - Total transformations in chunks
+    - Shared resources deduplicated
+    - Unique transformations preserved
+    - Verification: PASS/FAIL
+    
+    Execute merging now.
+
+finch_testing:
+  template: |
+    Test Spark SQL in Finch container: {sql_file}
+    
+    OBJECTIVE: End-to-end validation with SQL execution for error fixing
+    
+    ⚠️ CRITICAL RULES:
+    - DO NOT create separate test.sql files
+    - DO NOT create separate sample data files
+    - DO NOT create multiple report files
+    - ONLY create ONE final report: {validation_dir}/{{file_name}}_test_report.md
+    - Include everything (test data, execution results, errors) in that ONE report
+    
+    CONTAINER: use the Finch container named `converter-spark` (created by setup.sh).
+    - Run Spark SQL with: finch exec converter-spark /opt/spark/bin/spark-sql --master 'local[*]' -e "<sql>"
+      (or -f <file> for a file inside the container)
+    - Converted SQL is mounted read-only: output/hive/spark_sql/ -> /workspace/hive/,
+      output/impala/spark_sql/ -> /workspace/impala/
+    - /tmp is the only writable path inside the container
+    
+    STEPS:
+    1. Ensure converter-spark is running: finch ps --filter name=converter-spark
+       If it is stopped, start it: finch start converter-spark
+       If it does not exist, report FAIL with "run ./setup.sh to create converter-spark"
+    
+    2. Generate 1-2 sample data rows (inline in report, not separate files):
+       - Analyze SQL to understand required columns and types
+       - Create minimal realistic test data (1-2 rows per table)
+       - Include sample data in the report for reference
+    
+    3. Execute SQL in Finch/Spark:
+       - Use finch exec converter-spark to run spark-sql commands
+       - Create temp tables with sample data inline
+       - Execute the converted SQL
+       - Capture output and errors
+    
+    4. Document everything in ONE report file:
+       {validation_dir}/{{file_name}}_test_report.md
+    
+    REPORT FORMAT:
+    ```markdown
+    # Test Report: {{file_name}}
+    
+    ## Test Date
+    {{current_date_time}}
+    
+    ## Sample Test Data (1-2 rows)
+    
+    ### Table: source_table_1
+    | column1 | column2 | column3 |
+    |---------|---------|---------|
+    | value1  | value2  | value3  |
+    
+    ### Table: source_table_2
+    | column1 | column2 |
+    |---------|---------|
+    | value1  | value2  |
+    
+    ## Execution Results
+    
+    ### Command Executed
+    ```sql
+    -- SQL executed in Finch
+    ```
+    
+    ### Output
+    ```
+    -- Execution output or errors
+    ```
+    
+    ## Test Result
+    - **Status**: PASS or FAIL
+    - **Runtime Errors**: None or list errors
+    - **Output Schema**: Verified or issues found
+    
+    ## Summary
+    Brief summary of test results and any issues found.
+    ```
+    
+    CRITICAL: Save ONLY this ONE report file. No separate test.sql, no separate data files.
+    
+    Execute testing now.

@@ -1,0 +1,10 @@
+    # ── Task: {{ task_id }} ──────────────────────────────────────────────
+    # Source Job: {{ source_job_id }} (sub-flow → triggers child DAG)
+    # Triggers: {{ trigger_dag_id }}
+    {{ task_id }} = TriggerDagRunOperator(
+        task_id="{{ task_id }}",
+        trigger_dag_id="{{ trigger_dag_id }}",
+        wait_for_completion={{ wait_for_completion | default(True) }},
+        reset_dag_run=True,
+        poke_interval=60,
+    )

@@ -1,0 +1,50 @@
+version: '3.8'
+
+# Spark container used to execute converted Spark SQL (hive-eval).
+# Hardening (verified with Finch): ports on 127.0.0.1 only, read-only root
+# filesystem with tmpfs for the paths Spark writes to, all capabilities dropped,
+# no-new-privileges, memory/CPU limits, converted SQL mounted read-only.
+# no-new-privileges is listed in both spellings: Finch/nerdctl only enforces the plain
+# form (it ignores ":true"), while Docker and security scanners expect ":true".
+
+services:
+  spark:
+    image: apache/spark:3.5.0
+    container_name: converter-spark
+    ports:
+      - "127.0.0.1:4040:4040"  # Spark UI — bound to localhost only
+      - "127.0.0.1:8080:8080"  # Spark Master Web UI — bound to localhost only
+    environment:
+      SPARK_MODE: master
+      SPARK_MASTER_HOST: spark
+      # Bind Spark to localhost: Finch does not always put the container's own
+      # hostname in /etc/hosts, and spark-sql then aborts with UnknownHostException.
+      SPARK_LOCAL_IP: 127.0.0.1
+      SPARK_LOCAL_HOSTNAME: localhost
+    working_dir: /opt/spark/work-dir
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777,size=1g          # exec: JVM extracts native libs here
+      - /opt/spark/work-dir:uid=185,gid=185,mode=0755,size=1g  # metastore_db, spark-warehouse, derby.log
+    volumes:
+      # Converted Spark SQL (read-only) -- created by setup.sh / the orchestrator
+      - ./output/hive/spark_sql:/workspace/hive:ro
+      - ./output/impala/spark_sql:/workspace/impala:ro
+    mem_limit: 4g
+    cpus: 2.0
+    security_opt:
+      - no-new-privileges        # the form Finch/nerdctl enforces
+      - no-new-privileges:true   # the form Docker docs and scanners expect (Finch warns and ignores it)
+    cap_drop:
+      - ALL
+    command: >
+      bash -c "
+      /opt/spark/bin/spark-sql --master local[*] &
+      tail -f /dev/null
+      "
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "spark-sql"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

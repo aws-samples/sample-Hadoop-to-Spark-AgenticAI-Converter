@@ -1,0 +1,131 @@
+# Unified Orchestrator Configuration
+# Merges settings from .env and mwaa-converter/config/converter_config.yaml
+# Each agent receives only its section via the Orchestrator.
+#
+# All paths are relative to the project root. Everything you provide lives in
+# input/ and everything that is generated lands in output/. The authoritative
+# definition is project_paths.py -- keep this file in sync with it.
+
+global:
+  max_workers: 4
+  max_retries: 3
+  log_dir: output/logs/
+  state_dir: output/state/
+  mcp_json: .kiro/settings/mcp.json
+
+agents:
+  code_converter:
+    chunk_threshold: 1000          # Lines threshold for chunking
+    input_dir: input/hive
+    output_dir: output/hive/spark_sql
+    chunks_dir: output/hive/chunks
+    mermaid_dir: output/hive/mermaid
+    validation_dir: output/hive/validation
+    spark_container: converter-spark
+    spark_image: apache/spark:3.5.0
+    spark_ui_port: 4040
+
+  workflow_converter:
+    source_type: control_m         # control_m | airflow
+    input_dir: input/mwaa/control_m       # input/mwaa/airflow when source_type: airflow
+    output_dir: output/mwaa
+    spark_sql_mapping: input/mwaa/spark_sql_mapping.json
+    max_correction_attempts: 3
+    chunking_strategy: organizational
+    hive_conversion:
+      enabled: false
+      hive_input_dir: input/mwaa/hive_scripts
+      hive_staging_dir: output/mwaa/hive_staging
+      spark_sql_output_dir: output/mwaa/spark_sql
+      scripts_s3_prefix: "s3://${MWAA_SCRIPTS_BUCKET}/spark_sql"
+    dag_defaults:
+      owner: airflow
+      depends_on_past: false
+      email_on_failure: true
+      email_on_retry: false
+      retries: 1
+      retry_delay_minutes: 5
+      max_active_runs: 1
+    emr_serverless:
+      spark_submit_parameters: >-
+        --conf spark.executor.cores=4
+        --conf spark.executor.memory=8g
+        --conf spark.driver.cores=2
+        --conf spark.driver.memory=4g
+
+  accuracy_calculator:
+    min_confidence: 0.85
+    hive_report_dir: output/hive/accuracy
+    impala_report_dir: output/impala/accuracy
+    dimensions:
+      - SCS   # Syntactic Correctness
+      - SES   # Semantic Equivalence
+      - FCS   # Functional Correctness
+      - SFS   # Structural Fidelity
+      - CIS   # Chunking Integrity
+      - CVS   # Coverage
+      - NHS   # NULL Handling
+      - BCS   # Breaking Changes
+
+  test_validator:
+    enabled: false
+    spark_container: converter-spark
+
+  test_orchestrator:
+    hive_input_dir: input/hive                 # original HiveQL
+    spark_sql_input_dir: output/hive/spark_sql   # converted Spark SQL
+    ddl_input_dir: input/ddl
+    generated_data_dir: output/testing/generated_data
+    execution_output_dir: output/testing/execution_output
+    reports_dir: output/testing/reports
+    state_dir: output/testing/state
+    compose_file: testing_framework/finch-compose-test.yml
+    sample_rows: 5
+    query_timeout: 600
+    container_startup_timeout: 180
+
+  test_execution:
+    hive_container: hive-test-runner
+    spark_container: spark-test-runner
+    hive_image: apache/hive:4.0.0
+    spark_image: apache/spark:3.5.0
+    hive_port: 10000
+    spark_ui_port: 4041
+
+  impala_converter:
+    input_dir: input/impala
+    output_dir: output/impala/spark_sql
+    chunks_dir: output/impala/chunks
+    mermaid_dir: output/impala/mermaid
+    validation_dir: output/impala/validation
+    spark_container: converter-spark
+    spark_image: apache/spark:3.5.0
+
+self_correction:
+  max_corrections_per_task: 3
+  rules:
+    - name: low_accuracy_correction
+      trigger_agent: accuracy_calculator
+      trigger_tool: analyze_accuracy
+      threshold: 0.70
+    - name: dag_validation_correction
+      trigger_agent: workflow_validator
+      trigger_tool: validate_syntax
+    - name: spark_execution_correction
+      trigger_agent: hive_eval
+      trigger_tool: execute_spark_sql
+    - name: impala_conversion_correction
+      trigger_agent: impala_converter
+      trigger_tool: validate_impala_spark_sql
+      threshold: 0.70
+
+event_triggers:
+  - name: accuracy_on_sql
+    pattern: ".sql"
+    source_agent: code_converter
+  - name: validate_on_dag
+    pattern: ".py"
+    source_agent: workflow_converter
+  - name: accuracy_on_impala_sql
+    pattern: ".sql"
+    source_agent: impala_converter

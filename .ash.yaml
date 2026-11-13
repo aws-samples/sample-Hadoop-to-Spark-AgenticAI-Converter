@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+# =============================================================================
+# ASH Configuration — HiveQL-SparkQL-Converter
+# =============================================================================
+# This config suppresses known false positives; each suppression has a documented justification.
+#
+# To re-evaluate suppressions, remove them and run: ash --mode local
+# =============================================================================
+
+project_name: hadoop-to-spark-sql-converter
+
+global_settings:
+  severity_threshold: MEDIUM
+  ignore_paths:
+    - path: "venv/"
+      reason: "Virtual environment — third-party packages, not project code"
+    - path: "venv-airflow/"
+      reason: "Separate Apache Airflow virtual environment (DagBag validation) — third-party packages, not project code"
+    - path: "__pycache__/"
+      reason: "Python bytecode cache — auto-generated"
+    - path: "*.pyc"
+      reason: "Python compiled bytecode"
+    - path: ".git/"
+      reason: "Git internal directory"
+    - path: "security_reports/"
+      reason: "Generated scan output — not source code"
+  suppressions:
+    # =========================================================================
+    # Jinja2 Direct Use (XSS audit)
+    # =========================================================================
+    # Justification: dag_builder.py uses Jinja2 to generate Airflow DAG Python
+    # source code files (.py), NOT HTML. There is no web UI, no HTTP server and
+    # no HTML output from these templates. HTML autoescape is therefore OFF on
+    # purpose: escaping turned quotes, '&&', '<' and '>' in generated code into
+    # HTML entities and produced invalid Python (verified). Generated DAGs are
+    # checked with ast.parse + Airflow DagBag and must be reviewed before use.
+    # (The writable-filesystem and curl|bash suppressions were removed: the
+    # containers now run read-only and setup.sh no longer pipes curl into bash.)
+    # =========================================================================
+    - path: "mwaa-converter/converter/dag_builder.py"
+      rule_id: "python.flask.security.xss.audit.direct-use-of-jinja2.direct-use-of-jinja2"
+      reason: "Jinja2 generates Airflow DAG Python source (.py), not HTML; no web UI or HTTP serving, so HTML autoescape does not apply (it corrupts generated code). DAGs are syntax/DagBag-checked and reviewed."
+
+fail_on_findings: true
+
+scanners:
+  bandit:
+    name: bandit
+    enabled: true
+    options:
+      severity_threshold: null
+      confidence_level: all
+      ignore_nosec: false
+      excluded_paths: []
+  semgrep:
+    name: semgrep
+    enabled: true
+    options:
+      severity_threshold: null
+      config: auto
+      exclude:
+        - "*-converted.py"
+        - "*_report_result.txt"
+  checkov:
+    name: checkov
+    enabled: true
+    options:
+      severity_threshold: null
+      frameworks:
+        - all
+  detect-secrets:
+    name: detect-secrets
+    enabled: true
+    options:
+      severity_threshold: null
+  cdk-nag:
+    name: cdk-nag
+    enabled: true
+    options:
+      severity_threshold: null
+  npm-audit:
+    name: npm-audit
+    enabled: true
+    options:
+      severity_threshold: null
